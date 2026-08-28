@@ -1,5 +1,6 @@
 """
-单样本全流程配准执行器 (SampleRunner)
+自适应工作流执行器 (SampleRunner)
+根据 ExecutionPlan 智能调度不同任务路径，实现严格产物安全隔离 (final / review / debug)
 """
 
 from pathlib import Path
@@ -9,132 +10,199 @@ import cv2
 import numpy as np
 
 from crossstainwsi.domain import QCMetrics, RegistrationResult, RegistrationStatus
+from crossstainwsi.inventory.assets import SampleAssets
+from crossstainwsi.inventory.discover import AssetDiscoverer
 from crossstainwsi.io.image import ImageCropReader
 from crossstainwsi.io.kfb import KFBReader
 from crossstainwsi.matching.loftr import LoFTRMatcher
 from crossstainwsi.pipeline.config import PipelineConfig
+from crossstainwsi.planning.acquisition import AcquisitionProfile
+from crossstainwsi.planning.execution_plan import ExecutionPlan, TaskType
+from crossstainwsi.planning.goal import UserGoal
+from crossstainwsi.planning.planner import WorkflowPlanner
 from crossstainwsi.qc.rules import QCRuleEngine
 from crossstainwsi.registration.global_reg import GlobalRegistrar
 from crossstainwsi.registration.local_reg import LocalRefiner
 from crossstainwsi.registration.reference_anchor import ReferenceAnchorLocator
 from crossstainwsi.reporting.contact_sheet import ContactSheetGenerator
 from crossstainwsi.reporting.report import ReportGenerator
+from crossstainwsi.review.states import ArtifactTier, ConfidenceTier, RunVerdict, resolve_artifact_dir
 from crossstainwsi.sampling.sampler import WSISampler
 from crossstainwsi.tissue.islands import TissueSegmenter
 from crossstainwsi.transforms.geom import affine, apply_mat, h
 from crossstainwsi.transforms.graph import TransformGraph
 
 
-def find_file_case_insensitive(directory: Path, pattern_prefix: str, suffix: str) -> Optional[Path]:
-    dir_path = Path(directory)
-    if not dir_path.exists():
-        return None
-    target = (pattern_prefix + suffix).lower()
-    for p in dir_path.iterdir():
-        if p.name.lower() == target:
-            return p
-    for p in dir_path.glob(f"*{suffix}"):
-        if pattern_prefix.lower() in p.name.lower():
-            return p
-    return None
-
-
 class SampleRunner:
     """
-    负责执行单个样本从参考定位、组织岛隔离、全局深度形态匹配、局部微调、Level 0 采样到报告输出的全流程
+    自适应跨染色 WSI 配准与提取执行器
     """
-    def __init__(self, config: Optional[PipelineConfig] = None, loftr_matcher: Optional[LoFTRMatcher] = None):
+    def __init__(
+        self,
+        config: Optional[PipelineConfig] = None,
+        loftr_matcher: Optional[LoFTRMatcher] = None,
+        goal: Optional[UserGoal] = None,
+        acquisition_profile: Optional[AcquisitionProfile] = None,
+    ):
         self.cfg = config or PipelineConfig()
+        self.goal = goal or UserGoal()
+        self.profile = acquisition_profile or AcquisitionProfile()
         self.device = self.cfg.get_torch_device()
         self.loftr = loftr_matcher or LoFTRMatcher(device=self.device)
         self.anchor_locator = ReferenceAnchorLocator()
         self.global_registrar = GlobalRegistrar(loftr_matcher=self.loftr)
         self.local_refiner = LocalRefiner(loftr_matcher=self.loftr)
         self.qc_engine = QCRuleEngine()
+        self.planner = WorkflowPlanner(goal=self.goal, acquisition_profile=self.profile)
 
-    def process(self, sample_id: str) -> Dict[str, Any]:
+    def process(
+        self,
+        sample_id: str,
+        assets: Optional[SampleAssets] = None,
+        plan: Optional[ExecutionPlan] = None,
+    ) -> Dict[str, Any]:
         start_time = time.time()
-        sample_out = self.cfg.output_dir / sample_id
-        sample_out.mkdir(parents=True, exist_ok=True)
+        sample_base_out = self.cfg.output_dir / sample_id
+        sample_base_out.mkdir(parents=True, exist_ok=True)
 
-        is_mirrored = sample_id in self.cfg.mirrored_samples
-        print(f"\n================ [CrossStainWSI] Processing [{sample_id}] ================")
-        if is_mirrored:
-            print(f"[*] Sample {sample_id} is marked as MIRRORED; automatically flipping horizontal inputs.")
-
-        # 1. 查找输入文件
-        ref_kfb_path = find_file_case_insensitive(
-            self.cfg.base_dir / self.cfg.reference_stain,
-            f"{sample_id}-{self.cfg.reference_stain}",
-            ".kfb"
-        )
-        crop4_path = find_file_case_insensitive(self.cfg.tiff_dir, f"{sample_id}-4x", ".tif")
-        crop20_path = find_file_case_insensitive(self.cfg.tiff_dir, f"{sample_id}-20x", ".tif")
-
-        if not ref_kfb_path or not crop4_path or not crop20_path:
-            raise FileNotFoundError(
-                f"Missing inputs for {sample_id}: "
-                f"RefKFB={ref_kfb_path}, Crop4={crop4_path}, Crop20={crop20_path}"
+        # 1. 资产发现与规划 (如果没有直接提供)
+        if assets is None:
+            discoverer = AssetDiscoverer(
+                base_dir=self.cfg.base_dir,
+                tiff_dir=self.cfg.tiff_dir,
+                mirrored_sample_ids=self.cfg.mirrored_samples,
             )
+            inventory = discoverer.discover()
+            assets = inventory.get_sample(sample_id)
+            if not assets:
+                raise FileNotFoundError(f"No assets discovered for sample [{sample_id}] in {self.cfg.base_dir}")
 
-        # 2. 读取手工截图
-        crop4_bgr, (crop4_w, crop4_h) = ImageCropReader.load_crop_bgr(crop4_path, flip_horizontal=is_mirrored)
-        crop20_bgr, (crop20_w, crop20_h) = ImageCropReader.load_crop_bgr(crop20_path, flip_horizontal=is_mirrored)
+        if plan is None:
+            plan = self.planner.plan(assets)
 
-        # 3. 参考切片锚点定位
-        print("1. Localizing Reference (Masson) Anchor in WSI...")
-        with KFBReader(ref_kfb_path, default_mpp=self.cfg.default_mpp) as ref_reader:
+        print(f"\n{plan.describe()}\n")
+
+        # 2. 前置检查拦截 (如缺少必选染色)
+        if not plan.is_executable:
+            print(f"[BLOCKED] Execution plan cannot run: {plan.block_reason}")
+            debug_out = resolve_artifact_dir(sample_base_out, RunVerdict.INCOMPLETE)
+            report = ReportGenerator.save_sample_report(
+                sample_id=sample_id,
+                results={},
+                anchor_info={"error": plan.block_reason},
+                mpp_info={},
+                fov_info={},
+                out_path=debug_out / "registration_report.json",
+                elapsed_seconds=time.time() - start_time,
+            )
+            report["overall_status"] = RunVerdict.INCOMPLETE.value
+            return report
+
+        # 3. 获取参考切片
+        ref_slide_asset = assets.get_slide(plan.reference_stain)
+        if not ref_slide_asset:
+            raise FileNotFoundError(f"Reference stain '{plan.reference_stain}' missing")
+
+        # 4. 根据任务类型获取或构建 Reference ROI
+        is_mirrored = plan.plan_details.get("is_mirrored", False)
+        target_views = plan.requested_views
+        # 默认使用首个 view 作为主 view (例如 4x), 次个 view 为高倍 view (例如 20x)
+        view_4x = target_views[0] if len(target_views) > 0 else None
+        view_20x = target_views[1] if len(target_views) > 1 else None
+
+        crop4_w, crop4_h = view_4x.pixel_dimensions if view_4x else (2257, 1310)
+        crop20_w, crop20_h = view_20x.pixel_dimensions if view_20x else (2257, 1310)
+
+        with KFBReader(ref_slide_asset.path, default_mpp=self.cfg.default_mpp) as ref_reader:
             ref_spec = ref_reader.read_metadata()
-            anchor_res = self.anchor_locator.locate(crop4_bgr, ref_reader)
-            if not anchor_res.is_valid or anchor_res.mat_crop4_to_lvl4 is None:
-                raise RuntimeError(f"Reference anchor localization failed for sample {sample_id}")
-
-            print(f"   Anchor found ({anchor_res.localization_method}): inliers={anchor_res.metrics.inliers}, center_l0={anchor_res.center_lvl0}")
-
-            # 4. 保存 Masson 结果 (直接采用翻转后的高质量原始截图作为绝对基准)
-            ImageCropReader.save_publication_tiff(
-                crop4_bgr,
-                sample_out / f"{sample_id}-Masson-4x-300dpi.tif",
-            )
-            ImageCropReader.save_publication_tiff(
-                crop20_bgr,
-                sample_out / f"{sample_id}-Masson-20x-300dpi.tif",
-            )
-
-            # 读取 Level 4 图像进行组织岛提取
             ref_lvl4_bgr, ds_ref_l4, _ = ref_reader.read_level_image(4)
             ds_ref_l2 = ref_reader.read_metadata().get_level_downsample(2)
             ref_islands = TissueSegmenter.find_tissue_islands(ref_lvl4_bgr)
-            target_ref_island = TissueSegmenter.select_island_by_coordinate(ref_islands, anchor_res.center_lvl4)
 
-        # 5. 跨染色循环处理 (HE, Gram)
+            # 初始化拓扑变换图
+            graph = TransformGraph(
+                crop4_size=(crop4_w, crop4_h),
+                crop20_size=(crop20_w, crop20_h),
+                ref_ds_lvl2=ds_ref_l2,
+                ref_ds_lvl4=ds_ref_l4,
+                moving_ds_lvl2=4.0,  # 稍后根据 moving 切片动态重置
+                moving_ds_lvl4=16.0,
+                acquisition_profile=self.profile,
+            )
+
+            # 分支 A: Native ROI 模式 (零反查误差)
+            if plan.task_type == TaskType.NATIVE_ROI_MATCH:
+                ev = assets.roi_evidence
+                center_l0 = ev.native_center_l0
+                size_l0 = ev.native_size_l0 or (crop4_w * 5.0, crop4_h * 5.0)
+                graph.set_native_reference_roi(center_l0, size_l0)
+
+                # 直接从 Level 0 采样参考切片
+                mat_ref4_to_l0 = graph.get_crop4_to_moving_lvl0() # 在参考图上
+                ref_4x_extracted = WSISampler.sample_patch(ref_reader, mat_ref4_to_l0, (crop4_w, crop4_h), level=0)
+                mat_ref20_to_l0 = graph.get_crop20_to_moving_lvl0()
+                ref_20x_extracted = WSISampler.sample_patch(ref_reader, mat_ref20_to_l0, (crop20_w, crop20_h), level=0)
+
+                anchor_info = {"method": "NATIVE_WSI_COORDINATES", "center_l0": center_l0, "inliers": 9999}
+                target_ref_island = TissueSegmenter.select_island_by_coordinate(
+                    ref_islands, (center_l0[0] / ds_ref_l4, center_l0[1] / ds_ref_l4)
+                )
+
+            # 分支 B & C: 截图反查模式 (4x / 20x)
+            elif plan.task_type in (TaskType.DUAL_SCALE_REPRODUCE, TaskType.SINGLE_CROP_REPRODUCE, TaskType.HIGH_MAG_ASSISTED):
+                ev = assets.roi_evidence
+                crop4_path = ev.crop_4x_path or ev.crop_20x_path
+                crop4_bgr, (crop4_w, crop4_h) = ImageCropReader.load_crop_bgr(crop4_path, flip_horizontal=is_mirrored)
+
+                anchor_res = self.anchor_locator.locate(crop4_bgr, ref_reader)
+                if not anchor_res.is_valid:
+                    raise RuntimeError(f"Reference anchor localization rejected for sample {sample_id}")
+
+                graph.set_reference_anchor(anchor_res.mat_crop4_to_lvl4)
+                ref_4x_extracted = crop4_bgr
+
+                if ev.has_20x:
+                    ref_20x_extracted, (crop20_w, crop20_h) = ImageCropReader.load_crop_bgr(
+                        ev.crop_20x_path, flip_horizontal=is_mirrored
+                    )
+                else:
+                    # 仅有 4x 截图时，20x 从原参考 WSI Level 0 中按先验重采样
+                    mat_ref20_to_l0 = graph.get_crop20_to_moving_lvl0()
+                    ref_20x_extracted = WSISampler.sample_patch(ref_reader, mat_ref20_to_l0, (crop20_w, crop20_h), level=0)
+
+                anchor_info = {
+                    "method": anchor_res.localization_method,
+                    "center_l0": anchor_res.center_lvl0,
+                    "inliers": anchor_res.metrics.inliers,
+                }
+                target_ref_island = TissueSegmenter.select_island_by_coordinate(ref_islands, anchor_res.center_lvl4)
+
+            # 分支 E: 全片配准模式 (无 ROI 截图)
+            else:
+                ref_4x_extracted = ref_lvl4_bgr
+                ref_20x_extracted = ref_lvl4_bgr
+                anchor_info = {"method": "WHOLE_SLIDE_OVERVIEW"}
+                target_ref_island = ref_islands[0]
+
+        # 5. 跨染色循环处理 (HE, Gram 等)
         results_by_stain: Dict[str, RegistrationResult] = {}
-        all_4x_images = {"Masson": crop4_bgr}
-        all_20x_images = {"Masson": crop20_bgr}
+        all_4x_images = {plan.reference_stain: ref_4x_extracted}
+        all_20x_images = {plan.reference_stain: ref_20x_extracted}
+        overall_verdict = RunVerdict.PASS
 
-        for stain in self.cfg.moving_stains:
-            print(f"\n2. Registering moving stain [{stain}]...")
-            moving_kfb_path = find_file_case_insensitive(self.cfg.base_dir, f"{sample_id}-{stain}", ".kfb")
-            if not moving_kfb_path:
-                print(f"   [WARN] Moving slide for {stain} not found, skipping.")
+        for stain in plan.target_stains_available:
+            moving_asset = assets.get_slide(stain)
+            if not moving_asset:
                 continue
 
-            with KFBReader(moving_kfb_path, default_mpp=self.cfg.default_mpp) as moving_reader:
+            print(f"\n2. Registering stain [{stain}]...")
+            with KFBReader(moving_asset.path, default_mpp=self.cfg.default_mpp) as moving_reader:
                 moving_lvl4_bgr, ds_mov_l4, _ = moving_reader.read_level_image(4)
                 ds_mov_l2 = moving_reader.read_metadata().get_level_downsample(2)
 
-                # 初始化变换拓扑图
-                graph = TransformGraph(
-                    crop4_size=(crop4_w, crop4_h),
-                    crop20_size=(crop20_w, crop20_h),
-                    ref_ds_lvl2=ds_ref_l2,
-                    ref_ds_lvl4=ds_ref_l4,
-                    moving_ds_lvl2=ds_mov_l2,
-                    moving_ds_lvl4=ds_mov_l4,
-                )
-                graph.set_reference_anchor(anchor_res.mat_crop4_to_lvl4)
+                graph.moving_ds_lvl2 = ds_mov_l2
+                graph.moving_ds_lvl4 = ds_mov_l4
 
-                # 全局多角度形态匹配
                 global_res = self.global_registrar.register_stain(
                     moving_lvl4_bgr,
                     ref_lvl4_bgr,
@@ -142,11 +210,12 @@ class SampleRunner:
                 )
 
                 if not global_res.is_valid or global_res.mat_moving_to_ref_lvl4 is None:
-                    print(f"   [ABSTAIN] Global alignment failed for {stain}: {global_res.details.get('reason')}")
+                    print(f"   [ABSTAIN] Global alignment failed for {stain}")
+                    overall_verdict = RunVerdict.ABSTAIN
                     results_by_stain[stain] = RegistrationResult(
                         sample_id=sample_id,
                         moving_stain=stain,
-                        reference_stain=self.cfg.reference_stain,
+                        reference_stain=plan.reference_stain,
                         status=RegistrationStatus.ABSTAIN,
                         reason=global_res.details.get("reason", "Global alignment failed"),
                         metrics=global_res.metrics,
@@ -154,9 +223,9 @@ class SampleRunner:
                     continue
 
                 graph.set_global_cross_stain(global_res.mat_moving_to_ref_lvl4)
-                mat_crop4_to_mov_l2 = graph.get_crop4_to_moving_lvl2()
 
-                # 从 Moving Slide Level 2 单次采样 4x 初始切片
+                # 4x 初始提取与局部微调
+                mat_crop4_to_mov_l2 = graph.get_crop4_to_moving_lvl2()
                 initial_moving_4x = WSISampler.sample_patch(
                     moving_reader,
                     mat_crop4_to_mov_l2,
@@ -164,15 +233,11 @@ class SampleRunner:
                     level=2,
                 )
 
-                # 局部形态微调
-                print(f"3. Local morphology refinement for {stain}...")
-                local_res = self.local_refiner.refine(initial_moving_4x, crop4_bgr)
+                local_res = self.local_refiner.refine(initial_moving_4x, ref_4x_extracted)
                 graph.set_local_refinement(local_res.mat_local_3x3)
                 aligned_4x = local_res.aligned_image_bgr
-                print(f"   Local refinement applied: {local_res.method} (details: {local_res.details})")
 
-                # Level 0 单次无畸变重采样 20x
-                print(f"4. Direct Level-0 sampling for 20x [{stain}]...")
+                # 20x Level 0 直接重采样
                 mat_crop20_to_mov_l0 = graph.get_crop20_to_moving_lvl0()
                 aligned_20x = WSISampler.sample_patch(
                     moving_reader,
@@ -181,32 +246,12 @@ class SampleRunner:
                     level=0,
                 )
 
-                # QC 评估
+                # QC 判定
                 qc_status, qc_reason = self.qc_engine.evaluate_cross_stain(global_res.metrics)
-                print(f"   QC Status for {stain}: {qc_status.value} - {qc_reason}")
-
-                # 保存 4x 和 20x 出版级 TIFF
-                ImageCropReader.save_publication_tiff(
-                    aligned_4x,
-                    sample_out / f"{sample_id}-{stain}-4x-aligned-300dpi.tif",
-                )
-                ImageCropReader.save_publication_tiff(
-                    aligned_20x,
-                    sample_out / f"{sample_id}-{stain}-20x-aligned-300dpi.tif",
-                )
-
-                # 保存 Overlays
-                if self.cfg.save_overlays:
-                    ImageCropReader.save_overlay_png(
-                        crop4_bgr,
-                        aligned_4x,
-                        sample_out / f"overlay-{stain}-4x-aligned.png",
-                    )
-                    ImageCropReader.save_overlay_png(
-                        crop20_bgr,
-                        aligned_20x,
-                        sample_out / f"overlay-{stain}-20x-aligned.png",
-                    )
+                if qc_status == RegistrationStatus.ABSTAIN:
+                    overall_verdict = RunVerdict.ABSTAIN
+                elif qc_status == RegistrationStatus.WARN and overall_verdict == RunVerdict.PASS:
+                    overall_verdict = RunVerdict.REVIEW
 
                 all_4x_images[stain] = aligned_4x
                 all_20x_images[stain] = aligned_20x
@@ -214,7 +259,7 @@ class SampleRunner:
                 results_by_stain[stain] = RegistrationResult(
                     sample_id=sample_id,
                     moving_stain=stain,
-                    reference_stain=self.cfg.reference_stain,
+                    reference_stain=plan.reference_stain,
                     status=qc_status,
                     reason=qc_reason,
                     transform_matrix_3x3=global_res.mat_moving_to_ref_lvl4.tolist(),
@@ -225,18 +270,41 @@ class SampleRunner:
                     },
                 )
 
-        # 6. 生成 Contact Sheets 拼图
-        if self.cfg.save_contact_sheets:
-            print("5. Generating 4x and 20x Contact Sheets...")
+        # 6. 确定产物落盘目录 (final / review / debug)
+        target_out_dir = resolve_artifact_dir(sample_base_out, overall_verdict)
+        print(f"\n[Routing] Overall Verdict: {overall_verdict.value} -> Saving to: {target_out_dir}")
+
+        # 保存 Masson 参考图像与移动对齐图像
+        ImageCropReader.save_publication_tiff(ref_4x_extracted, target_out_dir / f"{sample_id}-Masson-4x-300dpi.tif")
+        ImageCropReader.save_publication_tiff(ref_20x_extracted, target_out_dir / f"{sample_id}-Masson-20x-300dpi.tif")
+
+        for stain, res in results_by_stain.items():
+            if res.status != RegistrationStatus.ABSTAIN:
+                ImageCropReader.save_publication_tiff(
+                    all_4x_images[stain], target_out_dir / f"{sample_id}-{stain}-4x-aligned-300dpi.tif"
+                )
+                ImageCropReader.save_publication_tiff(
+                    all_20x_images[stain], target_out_dir / f"{sample_id}-{stain}-20x-aligned-300dpi.tif"
+                )
+                if self.cfg.save_overlays:
+                    ImageCropReader.save_overlay_png(
+                        ref_4x_extracted, all_4x_images[stain], target_out_dir / f"overlay-{stain}-4x-aligned.png"
+                    )
+                    ImageCropReader.save_overlay_png(
+                        ref_20x_extracted, all_20x_images[stain], target_out_dir / f"overlay-{stain}-20x-aligned.png"
+                    )
+
+        # 生成 Contact Sheets
+        if self.cfg.save_contact_sheets and overall_verdict != RunVerdict.ABSTAIN:
             ContactSheetGenerator.create_contact_sheet(
                 all_4x_images,
-                f"Sample {sample_id} - 4x Aligned Cross-Stain Comparison (300 DPI)",
-                sample_out / f"contact_sheet_4x.png",
+                f"Sample {sample_id} - 4x Aligned Cross-Stain Comparison ({overall_verdict.value})",
+                target_out_dir / f"contact_sheet_4x.png",
             )
             ContactSheetGenerator.create_contact_sheet(
                 all_20x_images,
-                f"Sample {sample_id} - 20x Aligned Cross-Stain Comparison (300 DPI)",
-                sample_out / f"contact_sheet_20x.png",
+                f"Sample {sample_id} - 20x Aligned Cross-Stain Comparison ({overall_verdict.value})",
+                target_out_dir / f"contact_sheet_20x.png",
             )
 
         # 7. 保存结构化 JSON 报告
@@ -244,11 +312,7 @@ class SampleRunner:
         report = ReportGenerator.save_sample_report(
             sample_id=sample_id,
             results=results_by_stain,
-            anchor_info={
-                "center_lvl0": anchor_res.center_lvl0,
-                "inliers": anchor_res.metrics.inliers,
-                "method": anchor_res.localization_method,
-            },
+            anchor_info=anchor_info,
             mpp_info={
                 "mpp_x": ref_spec.mpp_x,
                 "mpp_y": ref_spec.mpp_y,
@@ -260,9 +324,10 @@ class SampleRunner:
                 "20x_width_um": crop20_w * ref_spec.mpp_x,
                 "20x_height_um": crop20_h * ref_spec.mpp_y,
             },
-            out_path=sample_out / "registration_report.json",
+            out_path=target_out_dir / "registration_report.json",
             elapsed_seconds=elapsed,
         )
+        report["overall_status"] = overall_verdict.value
+        report["artifact_tier"] = target_out_dir.name
 
-        print(f"[Done] Sample {sample_id} completed in {elapsed:.2f}s, Overall Status: {report['overall_status']}")
         return report
