@@ -1,7 +1,8 @@
 # CrossStainWSI
 
-**CrossStainWSI** is an auditable, adaptive cross-stain whole-slide image (WSI) registration and multi-scale region extraction toolkit for digital pathology and biomedical research.
+[English](README.md) | [简体中文](README_zh.md)
 
+**CrossStainWSI** is an auditable, adaptive cross-stain whole-slide image (WSI) registration and multi-scale region extraction toolkit for digital pathology and biomedical research.
 ---
 
 ## Key Features
