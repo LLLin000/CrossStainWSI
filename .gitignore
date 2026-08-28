@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# WSI and generated run artifacts
+*.kfb
+*.svs
+*.ndpi
+*.mrxs
+*.ome.tif
+*.ome.tiff
+runs/*
+!runs/.gitkeep
