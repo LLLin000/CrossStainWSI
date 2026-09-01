@@ -25,7 +25,7 @@ class CrossStainWSIGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("CrossStainWSI - 多染色病理切片自动配准与提取工作台")
-        self.root.geometry("1100, 720")
+        self.root.geometry("1100x720")
         self.root.minsize(960, 600)
 
         # 状态数据
