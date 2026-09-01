@@ -1,6 +1,6 @@
 """
 自适应工作流执行器 (SampleRunner)
-实现输入证据与输出要求的完全解耦、严格产物安全隔离与多视图单次 Level 0 采样
+实现输入证据与输出要求的完全解耦、Anchor坐标系局部微调、双尺度独立验证与全视图 Level 0 单次采样
 """
 
 from pathlib import Path
@@ -20,6 +20,7 @@ from crossstainwsi.planning.acquisition import AcquisitionProfile
 from crossstainwsi.planning.execution_plan import ExecutionPlan, TaskType
 from crossstainwsi.planning.goal import UserGoal, ViewSpec
 from crossstainwsi.planning.planner import WorkflowPlanner
+from crossstainwsi.qc.metrics import compute_same_image_metrics
 from crossstainwsi.qc.rules import QCRuleEngine
 from crossstainwsi.registration.global_reg import GlobalRegistrar
 from crossstainwsi.registration.local_reg import LocalRefiner
@@ -120,15 +121,13 @@ class SampleRunner:
             # 分支 A: Native ROI 模式 (0 锚点误差)
             if plan.task_type == TaskType.NATIVE_ROI_MATCH:
                 center_l0 = ev.native_center_l0
-                # 默认视场大小 (微米或像素)
-                base_w_l0 = 2257.0 * (ref_spec.mpp_x * 5.0)
-                base_h_l0 = 1310.0 * (ref_spec.mpp_y * 5.0)
-                size_l0 = ev.native_size_l0 or (base_w_l0, base_h_l0)
+                # 默认 Level-0 像素尺寸 (例如 4x 标准视场对应 2257 * 5 = 11285 Level-0 px)
+                size_l0 = ev.native_size_l0 or (11285, 6550)
 
                 anchor_ev_view = EvidenceView(
                     id="native_anchor",
-                    width_px=int(round(size_l0[0] / max(1e-4, ref_spec.mpp_x * 5.0))),
-                    height_px=int(round(size_l0[1] / max(1e-4, ref_spec.mpp_y * 5.0))),
+                    width_px=2257,
+                    height_px=1310,
                     nominal_magnification=4.0,
                 )
 
@@ -153,17 +152,19 @@ class SampleRunner:
 
             # 分支 B & C: 截图证据反查模式
             elif plan.task_type in (TaskType.DUAL_SCALE_REPRODUCE, TaskType.SINGLE_CROP_REPRODUCE, TaskType.HIGH_MAG_ASSISTED):
-                anchor_path = ev.crop_4x_path or ev.crop_20x_path
+                v_primary = ev.get_primary_anchor_evidence()
+                if not v_primary or not v_primary.source_path:
+                    v_primary = EvidenceView(id="anchor_fallback", width_px=2257, height_px=1310, nominal_magnification=4.0, source_path=ev.crop_4x_path or ev.crop_20x_path)
+
                 # 证据原图绝对不预翻转 (flip_horizontal=False)，完全由 ReferenceAnchorLocator 处理
-                raw_crop_bgr, (crop_w, crop_h) = ImageCropReader.load_crop_bgr(anchor_path, flip_horizontal=False)
-                nominal_mag = 4.0 if ev.crop_4x_path else 20.0
+                raw_crop_bgr, (crop_w, crop_h) = ImageCropReader.load_crop_bgr(v_primary.source_path, flip_horizontal=False)
 
                 anchor_ev_view = EvidenceView(
-                    id="imported_anchor",
+                    id=v_primary.id,
                     width_px=crop_w,
                     height_px=crop_h,
-                    nominal_magnification=nominal_mag,
-                    source_path=anchor_path,
+                    nominal_magnification=v_primary.nominal_magnification,
+                    source_path=v_primary.source_path,
                 )
 
                 graph = TransformGraph(
@@ -198,19 +199,34 @@ class SampleRunner:
 
                 graph.set_reference_anchor(anchor_res.mat_anchor_to_lvl4)
 
-                # 提取/准备参考切片的各目标视图
+                # 双尺度独立核验：若存在高倍辅助证据 (如 20x)，在参考切片上执行独立一致性验证
+                v_secondary = ev.get_secondary_verification_evidence()
+                if v_secondary and v_secondary.source_path:
+                    sec_raw_bgr, (sec_w, sec_h) = ImageCropReader.load_crop_bgr(v_secondary.source_path, flip_horizontal=False)
+                    m_sec_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, v_secondary, ds_ref_l2)
+                    sec_predicted_ref = WSISampler.sample_patch(ref_reader, m_sec_to_ref_l0, (sec_w, sec_h), level=0)
+                    sec_qc = compute_same_image_metrics(sec_raw_bgr, sec_predicted_ref)
+
+                    if sec_qc.inliers < 4 and (sec_qc.ncc_score or 0.0) < 0.20:
+                        print(f"   [ABSTAIN] Secondary evidence cross-scale conflict (inliers={sec_qc.inliers}, ncc={sec_qc.ncc_score})")
+                        debug_out = resolve_artifact_dir(sample_base_out, RunVerdict.ABSTAIN)
+                        report = ReportGenerator.save_sample_report(
+                            sample_id=sample_id,
+                            results={},
+                            anchor_info={"error": FailureCode.CROSS_SCALE_CONFLICT.value, "details": sec_qc.details},
+                            mpp_info={"mpp_x": ref_spec.mpp_x, "mpp_y": ref_spec.mpp_y, "provenance": ref_spec.mpp_source},
+                            fov_info=self._compute_fov_info(target_views, ref_spec.mpp_x),
+                            out_path=debug_out / "registration_report.json",
+                            elapsed_seconds=time.time() - start_time,
+                        )
+                        report["overall_status"] = RunVerdict.ABSTAIN.value
+                        return report
+
+                # 统一从 Reference WSI Level 0 单次重采样所有请求的输出视图 (保证完全相同的坐标系与未压缩画质)
                 for v in target_views:
-                    # 如果请求视图与锚点证据完全一致 (倍率和尺寸)，直接复用
-                    if (
-                        abs(v.magnification_approx - nominal_mag) < 0.1
-                        and v.pixel_dimensions == (crop_w, crop_h)
-                    ):
-                        ref_extracted_views[v.name] = cv2.flip(raw_crop_bgr, 1) if anchor_res.is_mirrored else raw_crop_bgr
-                    else:
-                        # 否则直接从 Reference WSI Level 0 逆重采样该目标视图
-                        m_v_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, v, ds_ref_l2)
-                        view_img = WSISampler.sample_patch(ref_reader, m_v_to_ref_l0, v.pixel_dimensions, level=0)
-                        ref_extracted_views[v.name] = view_img
+                    m_v_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, v, ds_ref_l2)
+                    view_img = WSISampler.sample_patch(ref_reader, m_v_to_ref_l0, v.pixel_dimensions, level=0)
+                    ref_extracted_views[v.name] = view_img
 
                 anchor_info = {
                     "method": anchor_res.localization_method,
@@ -220,10 +236,11 @@ class SampleRunner:
                 }
                 target_ref_island = TissueSegmenter.select_island_by_coordinate(ref_islands, anchor_res.center_lvl4)
 
-            # 分支 E: 全片配准模式
+            # 分支 E: 全片配准模式 (无任何截图)
             else:
                 anchor_ev_view = EvidenceView(id="overview", width_px=ref_lvl4_bgr.shape[1], height_px=ref_lvl4_bgr.shape[0], nominal_magnification=4.0)
                 graph = TransformGraph(anchor_view=anchor_ev_view, ref_ds_lvl2=ds_ref_l2, ref_ds_lvl4=ds_ref_l4, acquisition_profile=self.profile)
+                graph.set_reference_anchor(np.eye(3))
                 for v in target_views:
                     ref_extracted_views[v.name] = ref_lvl4_bgr
                 anchor_info = {"method": "WHOLE_SLIDE_OVERVIEW"}
@@ -234,9 +251,14 @@ class SampleRunner:
         stain_extracted_views: Dict[str, Dict[str, np.ndarray]] = {}
         overall_verdict = RunVerdict.PASS
 
-        # 用于局部对齐的主参考图
-        primary_ref_name = target_views[0].name if target_views else "4x"
-        primary_ref_img = ref_extracted_views.get(primary_ref_name, list(ref_extracted_views.values())[0])
+        # 提取 Anchor Frame 上的基准参考图像用于 Local Refinement (确保坐标系与物理 FOV 严格一致)
+        with KFBReader(ref_slide_asset.path, default_mpp=self.cfg.default_mpp) as ref_reader:
+            anchor_ref_img = WSISampler.sample_patch(
+                ref_reader,
+                graph.mat_anchor_to_ref_lvl2,
+                (anchor_ev_view.width_px, anchor_ev_view.height_px),
+                level=2,
+            )
 
         for stain in plan.target_stains_available:
             moving_asset = assets.get_slide(stain)
@@ -280,35 +302,31 @@ class SampleRunner:
 
                 graph.set_global_cross_stain(global_res.mat_moving_to_ref_lvl4)
 
-                # 提取初始主视图图像块进行局部微调
+                # 在严格相同的 Anchor Frame (相同的像素尺寸与物理视场) 中提取 moving patch 进行局部微调
                 mat_anchor_to_mov_l2 = graph.get_anchor_to_moving_lvl2()
-                initial_moving_primary = WSISampler.sample_patch(
+                anchor_mov_img = WSISampler.sample_patch(
                     moving_reader,
                     mat_anchor_to_mov_l2,
                     (anchor_ev_view.width_px, anchor_ev_view.height_px),
                     level=2,
                 )
 
-                local_res = self.local_refiner.refine(initial_moving_primary, primary_ref_img)
+                local_res = self.local_refiner.refine(anchor_mov_img, anchor_ref_img)
                 graph.set_local_refinement(local_res.mat_local_3x3)
-                aligned_primary = local_res.aligned_image_bgr
 
-                # 采样该染色的所有请求目标视图
+                # 所有请求的目标视图统一直接从 Moving Slide Level 0 单次重采样 (恪守只有一次插值原则)
                 stain_extracted_views[stain] = {}
                 for v in target_views:
-                    if v.name == primary_ref_name and local_res.method != "Identity_Fallback":
-                        stain_extracted_views[stain][v.name] = aligned_primary
-                    else:
-                        mat_v_to_mov_l0 = graph.get_view_to_moving_lvl0(target_view=v)
-                        view_img = WSISampler.sample_patch(
-                            moving_reader,
-                            mat_v_to_mov_l0,
-                            v.pixel_dimensions,
-                            level=0,
-                        )
-                        stain_extracted_views[stain][v.name] = view_img
+                    mat_v_to_mov_l0 = graph.get_view_to_moving_lvl0(target_view=v)
+                    view_img = WSISampler.sample_patch(
+                        moving_reader,
+                        mat_v_to_mov_l0,
+                        v.pixel_dimensions,
+                        level=0,
+                    )
+                    stain_extracted_views[stain][v.name] = view_img
 
-                # QC 判定
+                # QC 判定 (使用统一的 expected_scale 检验物理残差尺度)
                 qc_status, qc_failure_code, qc_reason = self.qc_engine.evaluate_cross_stain(
                     global_res.metrics, expected_scale_from_mpp=expected_scale
                 )
@@ -396,7 +414,7 @@ class SampleRunner:
             fov_info[f"{v.name}_height_um"] = v.pixel_dimensions[1] * effective_mpp
         return fov_info
 
-    def _get_ref_view_to_l0_matrix(self, graph: TransformGraph, view: ViewSpec, ds_ref_l2: float) -> np.ndarray:
+    def _get_ref_view_to_l0_matrix(self, graph: TransformGraph, view: Any, ds_ref_l2: float) -> np.ndarray:
         scale_l2_to_l0 = scale_matrix(ds_ref_l2, ds_ref_l2)
         m_view_to_anchor = self.profile.derive_view_to_anchor_matrix(graph.anchor_view, view)
         return scale_l2_to_l0 @ graph.mat_anchor_to_ref_lvl2 @ m_view_to_anchor
@@ -410,9 +428,10 @@ class SampleRunner:
     ) -> np.ndarray:
         cx, cy = center_l0
         w_px, h_px = view.pixel_dimensions
-        effective_mpp = ref_l0_mpp * (20.0 / max(0.1, view.magnification_approx))
-        w_l0 = w_px * (effective_mpp / ref_l0_mpp)
-        h_l0 = h_px * (effective_mpp / ref_l0_mpp)
+        # 视场物理缩放: 20x 对应 1x Level 0 像素跨度
+        view_to_l0_ratio = 20.0 / max(0.1, view.magnification_approx)
+        w_l0 = float(w_px * view_to_l0_ratio)
+        h_l0 = float(h_px * view_to_l0_ratio)
         sx = w_l0 / max(1.0, float(w_px))
         sy = h_l0 / max(1.0, float(h_px))
         tx = cx - (w_l0 / 2.0)
