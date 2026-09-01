@@ -3,56 +3,16 @@
 [English](README.md) | [简体中文](README_zh.md)
 
 **CrossStainWSI** is an auditable, adaptive cross-stain whole-slide image (WSI) registration and multi-scale region extraction toolkit for digital pathology and biomedical research.
+
 ---
 
 ## Key Features
 
-- **Decoupled Inputs & Outputs**: Separates *Input Evidence* (WSI files, optional historical screenshots, native Level-0 coordinates) from *Output Requirements* (publication-grade 300 DPI crops, overlays, contact sheets, arbitrary physical FOVs).
+- **Decoupled Inputs & Outputs**: Separates *Input Evidence* (WSI files, optional historical screenshots, native Level-0 coordinates) from *Output Requirements* (publication-grade 300 DPI crops, overlays, custom physical FOVs).
 - **Adaptive Workflow Planner**: Automatically inspects available materials and formulates an `ExecutionPlan` tailored to your goal.
 - **Deep Morphology Alignment**: Combines multi-angle LoFTR deep feature matching, connected tissue island isolation, and bounded local residual refinement (Local LoFTR + Sobel phase correlation).
 - **Single-Pass Level-0 Sampling**: Direct inverse warp sampling (`cv2.warpAffine` + `WARP_INVERSE_MAP`) straight from WSI Level 0, completely avoiding cumulative rotation blur, artificial white corners, and shear deformations.
 - **Strict QC & Safety Gating**: Segregates outputs into `final/` (PASS), `review/` (WARN / manual review), and `debug/` (ABSTAIN / INCOMPLETE). Never generates misleading publication TIFFs when alignment evidence is weak.
-
----
-
-## Architecture Overview
-
-```text
-               User / Data Directory
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │   Asset Discovery   │  (inventory: WSI, 4x/20x crops, native coords)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Workflow Planner   │  (planning: UserGoal + AcquisitionProfile)
-             └──────────┬──────────┘
-                        │
-                        ▼
-                 ExecutionPlan  (TaskType, ConfidenceTier, Gating)
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Registration Core  │  (tissue islands, global LoFTR, local refiner)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │   Transform Graph   │  (M_20x_to_L0 = S · M_4x_to_L2 · M_local^-1 · M_20x_to_4x)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Level-0 Sampling   │  (WSISampler single-pass inverse map)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Artifact Routing   │  (final/ vs review/ vs debug/)
-             └─────────────────────┘
-```
 
 ---
 
@@ -68,85 +28,39 @@
 
 ---
 
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/LLLin000/CrossStainWSI.git
-cd CrossStainWSI
-
-# Install in editable mode
-pip install -e .
-```
-
-### Dependencies
-- Python >= 3.10
-- PyTorch & Kornia (for LoFTR deep morphological matching)
-- OpenCV (`cv2`)
-- `kfbslide` (or OpenSlide for digital pathology WSI I/O)
-- Pillow, NumPy, SciPy
-
----
-
 ## Command Line Interface (CLI)
 
-### 1. Discover Assets
-Scan and summarize available WSI slides and existing screenshot evidence:
 ```bash
+# 1. Discover Assets
 crossstainwsi discover --base-dir /path/to/wsi --tiff-dir /path/to/crops
-```
 
-### 2. Inspect Execution Plan
-Preview how the engine will handle a specific sample before running heavy computation:
-```bash
+# 2. Inspect Execution Plan
 crossstainwsi plan 4W-5-3 --base-dir /path/to/wsi --tiff-dir /path/to/crops
-```
 
-### 3. Run Single Sample
-Execute registration and extract publication-ready crops:
-```bash
-crossstainwsi run 4W-5-3 --base-dir /path/to/wsi --out-dir /path/to/output
-```
+# 3. Run Single Sample (Default parameters)
+crossstainwsi run 4W-5-3
 
-### 4. Batch Processing
-Run multiple samples with automatic checkpointing and no automatic shutdown:
-```bash
+# Custom parameters: specify reference stain, target stains, and 600 DPI
+crossstainwsi run 4W-5-3 --ref-stain HE --stains HE Gram --dpi 600
+
+# Horizontal mirror correction
+crossstainwsi run 2-2W-1 --mirror
+
+# 4. Batch Processing
 crossstainwsi batch 4W-5-3 2-2W-1 3-4W-2 --out-dir /path/to/output
 ```
 
----
+### CLI Parameters
 
-## Python API Usage
-
-```python
-from pathlib import Path
-from crossstainwsi.pipeline import PipelineConfig, SampleRunner, BatchRunner
-from crossstainwsi.planning import UserGoal, ViewSpec, StainRequirement
-
-# 1. Define custom goals
-goal = UserGoal(
-    reference_stain="masson",
-    stain_requirements=[
-        StainRequirement("HE", is_required=True),
-        StainRequirement("Gram", is_required=False),
-    ],
-    requested_views=[
-        ViewSpec(name="4x", pixel_dimensions=(2257, 1310), magnification_approx=4.0),
-        ViewSpec(name="20x", pixel_dimensions=(2257, 1310), magnification_approx=20.0),
-    ],
-)
-
-# 2. Execute Sample Runner
-cfg = PipelineConfig(
-    base_dir=Path(r"E:\研究数据\骨科\切片扫描\2026-08-21"),
-    output_dir=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"),
-)
-runner = SampleRunner(config=cfg, goal=goal)
-report = runner.process("4W-5-3")
-
-print(f"Overall Status: {report['overall_status']}")
-print(f"Artifact Tier:  {report['artifact_tier']}")
-```
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `--ref-stain` | `masson` | Reference stain name (the stain used for manual crop capture) |
+| `--stains` | `HE Gram` | Target stains to register and extract |
+| `--dpi` | `300` | Output image DPI (default: 300) |
+| `--scale-ratio` | `5.0` | Sampling scale ratio between 20x and 4x |
+| `--mirror` | `False` | Force horizontal mirror correction for input crops |
+| `--no-overlay` | `False` | Disable generating overlay comparison images |
+| `--contact-sheet`| `False` | Enable generating side-by-side contact sheets (default: False) |
 
 ---
 
@@ -164,8 +78,6 @@ output_dir/
         ├── 4W-5-3-HE-20x-aligned-300dpi.tif
         ├── overlay-HE-4x-aligned.png
         ├── overlay-HE-20x-aligned.png
-        ├── contact_sheet_4x.png
-        ├── contact_sheet_20x.png
         └── registration_report.json
 ```
 
@@ -173,7 +85,6 @@ output_dir/
 
 ## Testing
 
-Run unit and integration test suites:
 ```bash
 pytest -v
 ```

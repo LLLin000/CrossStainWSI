@@ -26,7 +26,12 @@ class WorkflowPlanner:
 
     def plan(self, assets: SampleAssets) -> ExecutionPlan:
         sample_id = assets.sample_id
-        ref_stain = self.goal.reference_stain
+        # 优先使用从截图文件名自动识别出的基准染色 (如果该切片确实存在)
+        inferred_stain = assets.roi_evidence.inferred_reference_stain
+        if inferred_stain and assets.has_stain(inferred_stain):
+            ref_stain = inferred_stain
+        else:
+            ref_stain = self.goal.reference_stain
 
         # 1. 检查参考切片是否存在
         ref_slide = assets.get_slide(ref_stain)

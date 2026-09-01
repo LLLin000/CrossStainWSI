@@ -62,9 +62,9 @@ class SampleRunner:
         plan: Optional[ExecutionPlan] = None,
     ) -> Dict[str, Any]:
         start_time = time.time()
+        self.cfg.notify_progress(sample_id, 5, "Initializing asset discovery & planning")
         sample_base_out = self.cfg.output_dir / sample_id
         sample_base_out.mkdir(parents=True, exist_ok=True)
-
         # 1. 资产发现与规划 (如果没有直接提供)
         if assets is None:
             discoverer = AssetDiscoverer(
@@ -274,26 +274,45 @@ class SampleRunner:
         target_out_dir = resolve_artifact_dir(sample_base_out, overall_verdict)
         print(f"\n[Routing] Overall Verdict: {overall_verdict.value} -> Saving to: {target_out_dir}")
 
-        # 保存 Masson 参考图像与移动对齐图像
-        ImageCropReader.save_publication_tiff(ref_4x_extracted, target_out_dir / f"{sample_id}-Masson-4x-300dpi.tif")
-        ImageCropReader.save_publication_tiff(ref_20x_extracted, target_out_dir / f"{sample_id}-Masson-20x-300dpi.tif")
+        # 保存参考图像与移动对齐图像 (遵循配置的 DPI)
+        dpi_tuple = (self.cfg.dpi, self.cfg.dpi)
+        ref_name = plan.reference_stain.capitalize()
+        ImageCropReader.save_publication_tiff(
+            ref_4x_extracted,
+            target_out_dir / f"{sample_id}-{ref_name}-4x-{self.cfg.dpi}dpi.tif",
+            dpi=dpi_tuple,
+        )
+        ImageCropReader.save_publication_tiff(
+            ref_20x_extracted,
+            target_out_dir / f"{sample_id}-{ref_name}-20x-{self.cfg.dpi}dpi.tif",
+            dpi=dpi_tuple,
+        )
 
         for stain, res in results_by_stain.items():
             if res.status != RegistrationStatus.ABSTAIN:
                 ImageCropReader.save_publication_tiff(
-                    all_4x_images[stain], target_out_dir / f"{sample_id}-{stain}-4x-aligned-300dpi.tif"
+                    all_4x_images[stain],
+                    target_out_dir / f"{sample_id}-{stain}-4x-aligned-{self.cfg.dpi}dpi.tif",
+                    dpi=dpi_tuple,
                 )
                 ImageCropReader.save_publication_tiff(
-                    all_20x_images[stain], target_out_dir / f"{sample_id}-{stain}-20x-aligned-300dpi.tif"
+                    all_20x_images[stain],
+                    target_out_dir / f"{sample_id}-{stain}-20x-aligned-{self.cfg.dpi}dpi.tif",
+                    dpi=dpi_tuple,
                 )
                 if self.cfg.save_overlays:
                     ImageCropReader.save_overlay_png(
-                        ref_4x_extracted, all_4x_images[stain], target_out_dir / f"overlay-{stain}-4x-aligned.png"
+                        ref_4x_extracted,
+                        all_4x_images[stain],
+                        target_out_dir / f"overlay-{stain}-4x-aligned.png",
+                        dpi=dpi_tuple,
                     )
                     ImageCropReader.save_overlay_png(
-                        ref_20x_extracted, all_20x_images[stain], target_out_dir / f"overlay-{stain}-20x-aligned.png"
+                        ref_20x_extracted,
+                        all_20x_images[stain],
+                        target_out_dir / f"overlay-{stain}-20x-aligned.png",
+                        dpi=dpi_tuple,
                     )
-
         # 生成 Contact Sheets
         if self.cfg.save_contact_sheets and overall_verdict != RunVerdict.ABSTAIN:
             ContactSheetGenerator.create_contact_sheet(

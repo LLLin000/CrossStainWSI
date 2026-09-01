@@ -24,47 +24,6 @@
 
 ---
 
-## 系统架构
-
-```text
-               用户 / 数据资产目录
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │   Asset Discovery   │  (资产发现: 自动扫描 WSI、截图证据、坐标标注)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Workflow Planner   │  (工作流规划: 撮合 UserGoal 与物理采集先验)
-             └──────────┬──────────┘
-                        │
-                        ▼
-                 ExecutionPlan     (生成自包含执行计划: TaskType, ConfidenceTier)
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Registration Core  │  (配准核心: 组织岛隔离 + 全局LoFTR + 局部微调)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │   Transform Graph   │  (坐标拓扑图: 统一解析复合矩阵 M_20x_to_L0)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Level-0 Sampling   │  (WSISampler 单次全精度逆映射重采样)
-             └──────────┬──────────┘
-                        │
-                        ▼
-             ┌─────────────────────┐
-             │  Artifact Routing   │  (产物安全分流: final/ vs review/ vs debug/)
-             └─────────────────────┘
-```
-
----
-
 ## 五大标准任务模式与置信度等级
 
 | 任务模式 | 可用输入材料 | 锚点定位策略 | 置信度等级 |
@@ -77,85 +36,40 @@
 
 ---
 
-## 安装说明
-
-```bash
-# 克隆仓库
-git clone https://github.com/LLLin000/CrossStainWSI.git
-cd CrossStainWSI
-
-# 可编辑模式安装
-pip install -e .
-```
-
-### 核心环境依赖
-- Python >= 3.10
-- PyTorch & Kornia (用于 LoFTR 深度形态学匹配模型)
-- OpenCV (`cv2`)
-- `kfbslide` 或 `OpenSlide` (用于 WSI 切片高速 I/O)
-- Pillow, NumPy, SciPy
-
----
-
 ## 命令行使用指南 (CLI)
 
-### 1. 资产自动发现 (Discover)
-自动扫描指定目录下的切片与截图证据，输出清晰概览：
 ```bash
+# 1. 资产自动发现 (Discover)
 crossstainwsi discover --base-dir /path/to/wsi --tiff-dir /path/to/crops
-```
 
-### 2. 执行计划预览 (Plan)
-在运行计算密集型配准之前，直观查看引擎生成的执行计划：
-```bash
+# 2. 执行计划预览 (Plan)
 crossstainwsi plan 4W-5-3 --base-dir /path/to/wsi --tiff-dir /path/to/crops
-```
 
-### 3. 单样本执行 (Run)
-执行配准、采样并自动根据质控等级将结果归档至 `final/`、`review/` 或 `debug/`：
-```bash
-crossstainwsi run 4W-5-3 --base-dir /path/to/wsi --out-dir /path/to/output
-```
+# 3. 单样本执行 (Run)
+# 最简运行 (全默认参数)
+crossstainwsi run 4W-5-3
 
-### 4. 批量执行 (Batch)
-安全批量处理多个样本（支持断点续跑，每次完成实时更新 `batch_summary.json`，**绝不自动关机**）：
-```bash
+# 指定基准染色、目标染色与输出 DPI (例如 600 DPI)
+crossstainwsi run 4W-5-3 --ref-stain HE --stains HE Gram --dpi 600
+
+# 水平镜像截图纠偏
+crossstainwsi run 2-2W-1 --mirror
+
+# 4. 批量执行 (Batch)
 crossstainwsi batch 4W-5-3 2-2W-1 3-4W-2 --out-dir /path/to/output
 ```
 
----
+### CLI 核心参数清单
 
-## Python API 调用示例
-
-```python
-from pathlib import Path
-from crossstainwsi.pipeline import PipelineConfig, SampleRunner, BatchRunner
-from crossstainwsi.planning import UserGoal, ViewSpec, StainRequirement
-
-# 1. 自定义业务目标
-goal = UserGoal(
-    reference_stain="masson",
-    stain_requirements=[
-        StainRequirement("HE", is_required=True),     # HE 为必选（缺失则中断）
-        StainRequirement("Gram", is_required=False),  # Gram 为可选
-    ],
-    requested_views=[
-        ViewSpec(name="4x", pixel_dimensions=(2257, 1310), magnification_approx=4.0),
-        ViewSpec(name="20x", pixel_dimensions=(2257, 1310), magnification_approx=20.0),
-    ],
-)
-
-# 2. 执行单样本
-cfg = PipelineConfig(
-    base_dir=Path(r"E:\研究数据\骨科\切片扫描\2026-08-21"),
-    output_dir=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"),
-)
-runner = SampleRunner(config=cfg, goal=goal)
-report = runner.process("4W-5-3")
-
-print(f"Overall Status: {report['overall_status']}")
-print(f"Artifact Tier:  {report['artifact_tier']}")
-```
+| 参数 | 默认值 | 作用与说明 |
+| :--- | :--- | :--- |
+| `--ref-stain` | `masson` | 指定参考基准染色（截图是从哪张切片上截取的） |
+| `--stains` | `HE Gram` | 指定需要对齐提取的移动染色列表 |
+| `--dpi` | `300` | 输出出版级 TIFF 的分辨率 (DPI) |
+| `--scale-ratio` | `5.0` | 20× 相对 4× 的视场采样倍率比例 |
+| `--mirror` | `False` | 强制对输入的截图进行水平翻转纠偏 |
+| `--no-overlay` | `False` | 关闭半透明配准重叠图 (Overlay) 输出 |
+| `--contact-sheet`| `False` | 开启多染色横向对比拼图输出 (默认关闭) |
 
 ---
 
@@ -173,8 +87,6 @@ output_dir/
         ├── 4W-5-3-HE-20x-aligned-300dpi.tif
         ├── overlay-HE-4x-aligned.png
         ├── overlay-HE-20x-aligned.png
-        ├── contact_sheet_4x.png
-        ├── contact_sheet_20x.png
         └── registration_report.json
 ```
 
@@ -182,7 +94,6 @@ output_dir/
 
 ## 单元测试
 
-运行项目完整测试套件：
 ```bash
 pytest -v
 ```

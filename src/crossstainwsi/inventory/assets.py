@@ -26,6 +26,7 @@ class ROIEvidence:
     crop_20x_path: Optional[Path] = None
     native_center_l0: Optional[Tuple[float, float]] = None
     native_size_l0: Optional[Tuple[int, int]] = None
+    inferred_reference_stain: Optional[str] = None
     is_mirrored: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 

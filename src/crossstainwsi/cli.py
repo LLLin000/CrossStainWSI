@@ -1,10 +1,9 @@
 """
-CrossStainWSI 增强型命令行接口 (CLI)
-支持 discover (资产发现), plan (工作流规划), run (单样本执行), batch (批处理)
+CrossStainWSI 极简命令行接口 (CLI)
+参数设计与 GUI 完全解耦，支持直接无缝对接未来图形界面
 """
 
 import argparse
-import json
 from pathlib import Path
 import sys
 from typing import List
@@ -20,7 +19,7 @@ from crossstainwsi.planning.planner import WorkflowPlanner
 def main(args: List[str] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="crossstainwsi",
-        description="CrossStainWSI: Auditable Cross-Stain Histology WSI Registration & Workflow Toolkit",
+        description="CrossStainWSI: Auditable Cross-Stain Whole-Slide Image Registration & Multi-Scale Extraction Toolkit",
     )
     subparsers = parser.add_subparsers(dest="command", help="Sub-commands")
 
@@ -34,7 +33,7 @@ def main(args: List[str] = None) -> int:
     plan_parser.add_argument("sample_id", type=str, help="Sample identifier (e.g. 4w-5-3, 2-2w-1)")
     plan_parser.add_argument("--base-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\2026-08-21"), help="Base WSI directory")
     plan_parser.add_argument("--tiff-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\tiff"), help="TIFF crop directory")
-    plan_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name")
+    plan_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name (default: masson)")
 
     # 3. run (单样本执行)
     run_parser = subparsers.add_parser("run", help="Execute registration and extraction on a single sample")
@@ -42,7 +41,13 @@ def main(args: List[str] = None) -> int:
     run_parser.add_argument("--base-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\2026-08-21"), help="Base WSI directory")
     run_parser.add_argument("--tiff-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\tiff"), help="TIFF crop directory")
     run_parser.add_argument("--out-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"), help="Output directory")
-    run_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name")
+    run_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name (default: masson)")
+    run_parser.add_argument("--stains", nargs="+", type=str, default=None, help="Target stains to register (e.g. HE Gram)")
+    run_parser.add_argument("--dpi", type=int, default=300, help="Output image DPI (default: 300)")
+    run_parser.add_argument("--scale-ratio", type=float, default=5.0, help="Magnification sampling scale ratio between 20x and 4x (default: 5.0)")
+    run_parser.add_argument("--mirror", action="store_true", help="Force horizontal mirror correction for input crop")
+    run_parser.add_argument("--no-overlay", action="store_true", help="Disable generating overlay comparison images")
+    run_parser.add_argument("--contact-sheet", action="store_true", help="Enable generating side-by-side contact sheets")
     run_parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
 
     # 4. batch (多样本批量执行)
@@ -51,6 +56,10 @@ def main(args: List[str] = None) -> int:
     batch_parser.add_argument("--base-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\2026-08-21"), help="Base WSI directory")
     batch_parser.add_argument("--tiff-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\tiff"), help="TIFF crop directory")
     batch_parser.add_argument("--out-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"), help="Output directory")
+    batch_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name (default: masson)")
+    batch_parser.add_argument("--stains", nargs="+", type=str, default=None, help="Target stains to register (e.g. HE Gram)")
+    batch_parser.add_argument("--dpi", type=int, default=300, help="Output image DPI (default: 300)")
+    batch_parser.add_argument("--scale-ratio", type=float, default=5.0, help="Sampling scale ratio (default: 5.0)")
     batch_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing completed sample reports")
     batch_parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
 
@@ -100,11 +109,22 @@ def main(args: List[str] = None) -> int:
         return 0
 
     elif parsed.command == "run":
+        mirrored_set = set(PipelineConfig().mirrored_samples)
+        if parsed.mirror:
+            mirrored_set.add(parsed.sample_id)
+
+        moving = parsed.stains or ["HE", "Gram"]
         cfg = PipelineConfig(
             base_dir=parsed.base_dir,
             tiff_dir=parsed.tiff_dir,
             output_dir=parsed.out_dir,
             reference_stain=parsed.ref_stain,
+            moving_stains=moving,
+            mirrored_samples=mirrored_set,
+            dpi=parsed.dpi,
+            sampling_scale_ratio=parsed.scale_ratio,
+            save_overlays=not parsed.no_overlay,
+            save_contact_sheets=parsed.contact_sheet,
             device=parsed.device,
         )
         runner = SampleRunner(config=cfg)
@@ -112,10 +132,15 @@ def main(args: List[str] = None) -> int:
         return 0
 
     elif parsed.command == "batch":
+        moving = parsed.stains or ["HE", "Gram"]
         cfg = PipelineConfig(
             base_dir=parsed.base_dir,
             tiff_dir=parsed.tiff_dir,
             output_dir=parsed.out_dir,
+            reference_stain=parsed.ref_stain,
+            moving_stains=moving,
+            dpi=parsed.dpi,
+            sampling_scale_ratio=parsed.scale_ratio,
             device=parsed.device,
         )
         runner = BatchRunner(config=cfg)
