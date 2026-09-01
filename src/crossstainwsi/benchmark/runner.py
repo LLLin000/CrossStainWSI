@@ -3,7 +3,7 @@
 自动批量运行几何扰动、消融实验与多指标报告汇总
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from crossstainwsi.benchmark.generator import PerturbationCase, SyntheticPerturbationGenerator
@@ -46,8 +46,9 @@ class BenchmarkHarness:
                 image_shape=case.image_original.shape[:2],
                 status=status,
                 failure_code=fail_code,
+                expected_matchable=case.expected_matchable,
                 success_tre_thresh_px=self.success_tre_thresh_px,
-                false_accept_tre_thresh_px=self.false_accept_tre_thresh_px,
+                unsafe_tre_thresh_px=self.false_accept_tre_thresh_px,
             )
             results.append(eval_res)
 
