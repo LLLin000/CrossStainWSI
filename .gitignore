@@ -14,5 +14,7 @@ venv/
 *.mrxs
 *.ome.tif
 *.ome.tiff
+benchmarks/
+test_data/
 runs/*
 !runs/.gitkeep

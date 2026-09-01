@@ -4,7 +4,11 @@
 
 CrossStainWSI is an auditable, adaptive cross-stain whole-slide image (WSI) registration and multi-scale region extraction toolkit.
 
-It unifies cross-stain histology registration by decoupling **Input Evidence** (WSI files, existing crop screenshots, native coordinates, annotations) from **Output Requirements** (custom physical FOV, publication-resolution 4x/20x/10x views, 300 DPI TIFFs, overlays, contact sheets, QC audits).
+It unifies cross-stain histology registration by decoupling **Input Evidence** (WSI files, existing crop screenshots, native coordinates, annotations) from **Output Requirements** (custom physical FOV, publication-resolution 4x/20x/10x views, 300 DPI TIFFs, overlays, QC audits).
+
+Detailed Technical Documents:
+- **Product Requirements Document (PRD)**: [`docs/PRD.md`](docs/PRD.md)
+- **Detailed Design Specification**: [`docs/DESIGN.md`](docs/DESIGN.md)
 
 The system workflow is:
 
@@ -17,7 +21,7 @@ PREFLIGHT & VALIDATION (missing required stain checks)
         ↓
 REFERENCE ROI (Native Coordinates or Dual-Scale SIFT/NCC Anchor)
         ↓
-CROSS-STAIN REGISTRATION (Global Multi-Angle LoFTR + Bounded Local Residuals)
+CROSS-STAIN REGISTRATION (Canonical Representations + Pluggable Matchers)
         ↓
 TRANSFORM GRAPH (Parent-Child Geometry)
         ↓
@@ -27,16 +31,16 @@ QC EVALUATION & SAFETY GATING (PASS / REVIEW / ABSTAIN)
         ↓
 ARTIFACT ROUTING (final/ vs review/ vs debug/)
         ↓
-STRUCTURED REPORTING & CONTACT SHEETS
+STRUCTURED REPORTING
 ```
 
 ## Repository state
 
 - Local repository: `D:\L\AI\CrossStainWSI`
 - Branch: `main`
-- Git remote: `https://github.com/LLLin000/CrossStainWSI`
+- Git remote: `https://github.com/LLLin000/CrossStainWSI` (Public)
 - Version: `0.2.0`
-- Tests: `14 passed in tests/`
+- Tests: `16 passed in tests/`
 
 Current package structure:
 
@@ -45,10 +49,13 @@ CrossStainWSI/
 ├─ CONTEXT.md
 ├─ .gitignore
 ├─ pyproject.toml
-├─ reference_impl/
-│  ├─ register_slices.py
-│  ├─ register_difficult_samples.py
-│  └─ reference_anchor_selfcheck.py
+├─ docs/
+│  ├─ PRD.md              # 完整产品需求与技术规格文档
+│  └─ DESIGN.md           # 详细架构与设计规范
+├─ benchmarks/            # 本地测试切片 (OME-TIFF，已加入 .gitignore)
+│  ├─ ihc/
+│  └─ cycif/
+├─ reference_impl/        # 历史单文件原型与参考实现
 ├─ src/
 │  └─ crossstainwsi/
 │     ├─ domain/          # SlideSpec, ROI, QCMetrics, RegistrationResult
@@ -64,7 +71,8 @@ CrossStainWSI/
 │     ├─ qc/              # compute_same_image_metrics, QCRuleEngine
 │     ├─ reporting/       # ReportGenerator, ContactSheetGenerator
 │     ├─ pipeline/        # PipelineConfig, SampleRunner, BatchRunner
-│     └─ cli.py           # CLI commands: discover, plan, run, batch
+│     ├─ gui/             # 独立 Tkinter 工作台 (CrossStainWSIGUI)
+│     └─ cli.py           # CLI: discover, plan, run, batch, gui
 └─ tests/
    ├─ test_domain.py
    ├─ test_transforms.py
@@ -72,7 +80,8 @@ CrossStainWSI/
    ├─ test_qc.py
    ├─ test_matching.py
    ├─ test_planning.py
-   └─ test_inventory.py
+   ├─ test_inventory.py
+   └─ test_gui.py
 ```
 
 ## Core Tasks & Confidence Tiers
@@ -105,19 +114,3 @@ CrossStainWSI/
 - **`final/`**: Strictly reserved for runs passing all criteria (`required stains present + anchor valid + global similarity accepted + requested views confirmed + Level 0 sampled`).
 - **`review/`**: Marginal confidence, mild serial section variance, or fallback local refinement. Requires manual visual confirmation.
 - **`debug/`**: Rejected runs, ambiguous anchors, scale deformations, or missing required stains (`INCOMPLETE`). **No fake publication TIFFs are generated in final/**.
-
-## CLI Usage
-
-```bash
-# Discover all WSI and crop evidence
-python -m crossstainwsi.cli discover
-
-# Inspect execution plan without running heavy computation
-python -m crossstainwsi.cli plan 4W-5-3
-
-# Run single sample
-python -m crossstainwsi.cli run 4W-5-3
-
-# Batch process multiple samples
-python -m crossstainwsi.cli batch 4W-5-3 2-2W-1 3-4W-2
-```
