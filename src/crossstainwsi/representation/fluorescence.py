@@ -1,6 +1,7 @@
 """
 免疫荧光 (mIF/CyCIF) 与多通道模态适配器 (FluorescenceAdapter, NuclearChannelResolver, ChannelEvidenceSelector)
 严格解耦细胞核定位通道 (Nuclear Channel) 与宏观组织辅助特征通道 (Informative Feature Channel)
+支持 uint16/uint8 尺度不变核结构质量门限与退化 DAPI 识别
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,10 +20,10 @@ class NuclearChannelResolver:
     def resolve_nuclear_channel(
         channels_hwc: np.ndarray,
         channel_names: Optional[List[str]] = None,
-        min_spot_score_thresh: float = 2.0,
+        min_spot_score_thresh: float = 1.0,
     ) -> Tuple[Optional[int], Optional[np.ndarray], str]:
         if channels_hwc.ndim == 2:
-            return 0, channels_hwc, "single_channel"
+            channels_hwc = channels_hwc[:, :, None]
 
         n_channels = channels_hwc.shape[2]
         dapi_idx = None
@@ -35,30 +36,48 @@ class NuclearChannelResolver:
                     dapi_idx = i
                     break
 
-        # 2. 若无通道命名，根据斑点状核形态特征启发式评分
-        if dapi_idx is None:
-            spot_scores = []
-            for i in range(n_channels):
-                ch = channels_hwc[:, :, i]
-                dyn = float(ch.max() - ch.min())
-                if dyn < 1e-4:
-                    spot_scores.append(-1.0)
-                    continue
-                # 顶帽变换提取细小圆点状细胞核
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-                tophat = cv2.morphologyEx(ch, cv2.MORPH_TOPHAT, kernel)
-                score = float(tophat.mean() * (dyn / 255.0))
-                spot_scores.append(score)
+        # 2. 对每个通道进行归一化后计算尺度不变的斑点核形态评分 (消除 uint16 动态范围干扰)
+        spot_scores = []
+        normalized_channels = []
 
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+
+        for i in range(n_channels):
+            ch = channels_hwc[:, :, i]
+            ch_min = float(ch.min())
+            ch_max = float(ch.max())
+            dyn = ch_max - ch_min
+
+            if dyn < 1e-4:
+                spot_scores.append(-1.0)
+                normalized_channels.append(np.zeros(ch.shape, dtype=np.uint8))
+                continue
+
+            ch_uint8 = np.clip((ch.astype(np.float32) - ch_min) / dyn * 255.0, 0, 255).astype(np.uint8)
+            normalized_channels.append(ch_uint8)
+
+            # 顶帽变换提取细小圆点状细胞核
+            tophat = cv2.morphologyEx(ch_uint8, cv2.MORPH_TOPHAT, kernel)
+            score = float(tophat.mean())
+            spot_scores.append(score)
+
+        # 3. 质量门限核验
+        if dapi_idx is not None:
+            # 命名虽然包含 DAPI，但必须检验是否具备真实核结构信号 (避免全黑/全白过曝虚假通道)
+            ch_name = channel_names[dapi_idx] if channel_names and dapi_idx < len(channel_names) else f"Channel_{dapi_idx}"
+            if spot_scores[dapi_idx] < 0.2:
+                # 信号退化或无斑点，安全标记为低信息量
+                return dapi_idx, None, f"{ch_name}_LOW_INFORMATION"
+            return dapi_idx, channels_hwc[:, :, dapi_idx], ch_name
+        else:
+            # 无通道命名时，严格按斑点核结构门限决定是否采纳
             if spot_scores and max(spot_scores) >= min_spot_score_thresh:
-                dapi_idx = int(np.argmax(spot_scores))
+                best_i = int(np.argmax(spot_scores))
+                ch_name = channel_names[best_i] if channel_names and best_i < len(channel_names) else f"Channel_{best_i}"
+                return best_i, channels_hwc[:, :, best_i], ch_name
             else:
                 # 质量不足且未命名的通道，拒绝硬猜为 DAPI
                 return None, None, "none"
-
-        ch_data = channels_hwc[:, :, dapi_idx]
-        ch_name = channel_names[dapi_idx] if channel_names and dapi_idx < len(channel_names) else f"Channel_{dapi_idx}"
-        return dapi_idx, ch_data, ch_name
 
 
 class ChannelEvidenceSelector:
@@ -91,13 +110,15 @@ class ChannelEvidenceSelector:
                 scores.append(-1.0)
                 continue
 
-            blurred = cv2.GaussianBlur(ch.astype(np.float32), (5, 5), 1.0)
+            # 归一化到 0~255 后计算梯度能量 (消除 uint16 与 uint8 差异)
+            ch_uint8 = np.clip((ch.astype(np.float32) - ch_min) / dyn_range * 255.0, 0, 255).astype(np.uint8)
+            blurred = cv2.GaussianBlur(ch_uint8.astype(np.float32), (5, 5), 1.0)
             gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0)
             gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1)
             grad_energy = float(np.mean(gx * gx + gy * gy))
 
             name_bonus = 2.0 if channel_names and i < len(channel_names) and "dapi" in channel_names[i].lower() else 1.0
-            score = grad_energy * dyn_range * name_bonus
+            score = grad_energy * name_bonus
             scores.append(score)
 
         best_idx = int(np.argmax(scores)) if scores else 0
@@ -151,12 +172,12 @@ class FluorescenceAdapter:
         else:
             channels_hwc = img_data[:, :, None]
 
-        # 1. 细胞核通道精确提取 (NuclearChannelResolver)
+        # 1. 细胞核通道精确提取与质量门禁 (NuclearChannelResolver)
         nuc_idx, dapi_raw, nuc_name = NuclearChannelResolver.resolve_nuclear_channel(channels_hwc, channel_names)
         if dapi_raw is not None:
             p_min, p_max = float(dapi_raw.min()), float(dapi_raw.max())
             if p_max - p_min > 1e-4:
-                dapi_uint8 = ((dapi_raw - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
+                dapi_uint8 = np.clip((dapi_raw.astype(np.float32) - p_min) / (p_max - p_min) * 255.0, 0, 255).astype(np.uint8)
             else:
                 dapi_uint8 = np.zeros(dapi_raw.shape[:2], dtype=np.uint8)
             nuclear_field = self._extract_log_nuclear_field(dapi_uint8)
@@ -169,7 +190,7 @@ class FluorescenceAdapter:
         feat_raw = channels_hwc[:, :, feat_idx]
         f_min, f_max = float(feat_raw.min()), float(feat_raw.max())
         if f_max - f_min > 1e-4:
-            feat_uint8 = ((feat_raw - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
+            feat_uint8 = np.clip((feat_raw.astype(np.float32) - f_min) / (f_max - f_min) * 255.0, 0, 255).astype(np.uint8)
         else:
             feat_uint8 = dapi_uint8
 

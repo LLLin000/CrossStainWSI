@@ -119,3 +119,16 @@ def test_benchmark_harness_suite_execution_with_positives_and_negatives():
     assert summary.false_accept_count == 0
     assert summary.correct_abstain_rate == 1.0
     assert np.isclose(summary.conditional_median_tre_px, 0.0, atol=1e-2)
+
+
+def test_benchmark_rng_reproducibility():
+    """
+    验证 RNG 随机数种子可复现性：相同 seed 生成完全一致的测试用例
+    """
+    img = np.full((100, 100, 3), 200, dtype=np.uint8)
+    suite_a = SyntheticPerturbationGenerator.generate_benchmark_suite(img, seed=42)
+    suite_b = SyntheticPerturbationGenerator.generate_benchmark_suite(img, seed=42)
+    suite_c = SyntheticPerturbationGenerator.generate_benchmark_suite(img, seed=999)
+
+    assert np.array_equal(suite_a[-1].image_perturbed, suite_b[-1].image_perturbed)
+    assert not np.array_equal(suite_a[-1].image_perturbed, suite_c[-1].image_perturbed)
