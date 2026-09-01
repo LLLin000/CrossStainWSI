@@ -36,6 +36,7 @@ class GlobalRegistrar:
         self,
         moving_bgr: np.ndarray,
         fixed_bgr: np.ndarray,
+        expected_scale_from_mpp: float = 1.0,
     ) -> Tuple[Optional[np.ndarray], QCMetrics, int, float]:
         """
         在 0°, 90°, 180°, 270° 四个正交旋转角度下运行 LoFTR，寻找最高得分对齐
@@ -64,8 +65,9 @@ class GlobalRegistrar:
                 m = match_res.metrics
                 score = m.inliers * m.inlier_ratio * (1.0 + m.spatial_coverage)
 
-                # 尺度约束: 0.90 ~ 1.10 (切片制样拉伸允许微小变形，但不允许虚假缩放)
-                if 0.90 <= m.scale <= 1.10 and score > best_score:
+                # 物理残差尺度约束: 0.88 ~ 1.12 (相对于两张切片 MPP 理论倍率比)
+                residual_scale = m.scale / max(1e-5, expected_scale_from_mpp)
+                if 0.88 <= residual_scale <= 1.12 and score > best_score:
                     best_score = score
                     best_angle = angle
                     # 将旋转补偿合并进总变换矩阵: M_total = M_loftr @ M_rot
@@ -80,6 +82,7 @@ class GlobalRegistrar:
         moving_lvl4_bgr: np.ndarray,
         fixed_lvl4_bgr: np.ndarray,
         target_ref_island: TissueIsland,
+        expected_scale_from_mpp: float = 1.0,
         min_island_inliers: int = 20,
         min_fallback_inliers: int = 12,
     ) -> GlobalAlignmentResult:
@@ -93,7 +96,9 @@ class GlobalRegistrar:
         # 1. 优先尝试与各组织岛进行局部隔离匹配
         for idx, mov_isl in enumerate(moving_islands):
             mat_isl, metrics_isl, angle_isl, score_isl = self.align_multiangle(
-                mov_isl.image, target_ref_island.image
+                mov_isl.image,
+                target_ref_island.image,
+                expected_scale_from_mpp=expected_scale_from_mpp,
             )
             if mat_isl is not None and score_isl > best_cand_score:
                 best_cand_score = score_isl
@@ -108,7 +113,9 @@ class GlobalRegistrar:
         # 2. 检查组织岛匹配质量，必要时启用全片回退
         if best_candidate is None or best_candidate["metrics"].inliers < min_island_inliers:
             mat_full, metrics_full, angle_full, score_full = self.align_multiangle(
-                moving_lvl4_bgr, fixed_lvl4_bgr
+                moving_lvl4_bgr,
+                fixed_lvl4_bgr,
+                expected_scale_from_mpp=expected_scale_from_mpp,
             )
             if mat_full is None or metrics_full.inliers < min_fallback_inliers:
                 return GlobalAlignmentResult(

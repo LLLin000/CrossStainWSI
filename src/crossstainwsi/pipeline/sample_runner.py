@@ -198,15 +198,20 @@ class SampleRunner:
             print(f"\n2. Registering stain [{stain}]...")
             with KFBReader(moving_asset.path, default_mpp=self.cfg.default_mpp) as moving_reader:
                 moving_lvl4_bgr, ds_mov_l4, _ = moving_reader.read_level_image(4)
-                ds_mov_l2 = moving_reader.read_metadata().get_level_downsample(2)
+                moving_spec = moving_reader.read_metadata()
+                ds_mov_l2 = moving_spec.get_level_downsample(2)
 
                 graph.moving_ds_lvl2 = ds_mov_l2
                 graph.moving_ds_lvl4 = ds_mov_l4
+
+                # 物理预期尺度比: Moving L4 -> Ref L4 映射的理论像素缩放为 MPP_moving / MPP_ref
+                expected_scale = moving_spec.mpp_x / max(1e-5, ref_spec.mpp_x)
 
                 global_res = self.global_registrar.register_stain(
                     moving_lvl4_bgr,
                     ref_lvl4_bgr,
                     target_ref_island,
+                    expected_scale_from_mpp=expected_scale,
                 )
 
                 if not global_res.is_valid or global_res.mat_moving_to_ref_lvl4 is None:
@@ -256,9 +261,7 @@ class SampleRunner:
                         )
                         stain_extracted_views[v.name] = view_img
 
-                # QC 判定
-                # QC 判定 (考虑扫描仪物理分辨率 MPP 比例)
-                expected_scale = ref_spec.mpp_x / max(1e-5, moving_reader.read_metadata().mpp_x)
+                # QC 判定 (使用统一的 expected_scale 检验物理残差尺度)
                 qc_status, qc_failure_code, qc_reason = self.qc_engine.evaluate_cross_stain(
                     global_res.metrics, expected_scale_from_mpp=expected_scale
                 )
@@ -266,7 +269,6 @@ class SampleRunner:
                     overall_verdict = RunVerdict.ABSTAIN
                 elif qc_status == RegistrationStatus.WARN and overall_verdict == RunVerdict.PASS:
                     overall_verdict = RunVerdict.REVIEW
-
                 results_by_stain[stain] = RegistrationResult(
                     sample_id=sample_id,
                     moving_stain=stain,

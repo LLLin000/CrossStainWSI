@@ -25,6 +25,7 @@ class TransformGraph:
         moving_ds_lvl2: float = 4.0,
         moving_ds_lvl4: float = 16.0,
         acquisition_profile: Optional[AcquisitionProfile] = None,
+        # 向后兼容旧参数名:
         crop4_size: Optional[Tuple[int, int]] = None,
         crop20_size: Optional[Tuple[int, int]] = None,
     ):
@@ -32,6 +33,10 @@ class TransformGraph:
             anchor_view = crop4_size or (2257, 1310)
         if secondary_view is None and crop20_size is not None:
             secondary_view = crop20_size
+
+        self.anchor_view = anchor_view
+        self.secondary_view = secondary_view
+
         if isinstance(anchor_view, EvidenceView):
             self.anchor_w, self.anchor_h = anchor_view.width_px, anchor_view.height_px
             self.anchor_mag = anchor_view.nominal_magnification
@@ -60,10 +65,10 @@ class TransformGraph:
         self.moving_ds_lvl4 = moving_ds_lvl4
         self.profile = acquisition_profile or AcquisitionProfile()
 
-        # 推导主视场与子视场之间的相对像素映射
-        self.mat_secondary_to_anchor = self.profile.derive_crop20_to_crop4_matrix(
-            (self.anchor_w, self.anchor_h),
-            (self.secondary_w, self.secondary_h),
+        # 推导主视场与子视场之间的相对像素映射 (物理 MPP 优先)
+        self.mat_secondary_to_anchor = self.profile.derive_view_to_anchor_matrix(
+            self.anchor_view,
+            self.secondary_view or (self.secondary_w, self.secondary_h),
         )
         self.mat_crop20_to_crop4 = self.mat_secondary_to_anchor
 
@@ -75,7 +80,6 @@ class TransformGraph:
         self.mat_anchor_to_moving_lvl2: Optional[np.ndarray] = None
         self.mat_local_refinement_3x3: np.ndarray = np.eye(3, dtype=np.float64)
 
-    # 兼容旧属性名
     @property
     def mat_crop4_to_ref_lvl4(self) -> Optional[np.ndarray]:
         return self.mat_anchor_to_ref_lvl4
@@ -163,30 +167,27 @@ class TransformGraph:
 
     def get_view_to_moving_lvl0(
         self,
+        target_view: Optional[Any] = None,
         target_mag: float = 4.0,
-        base_mag: float = 4.0,
+        base_mag: Optional[float] = None,
         target_size: Optional[Tuple[int, int]] = None,
     ) -> np.ndarray:
         """
-        计算任意请求输出视图 (如 4x, 10x, 20x, 40x 或自定义尺寸) 像素空间直接到 Moving 切片 Level 0 的复合逆映射矩阵:
+        计算任意请求输出视图 (EvidenceView, ViewSpec, 或指定倍率/尺寸) 像素空间直接到 Moving 切片 Level 0 的复合逆映射矩阵:
         M_total = S(lvl2->lvl0) @ M(anchor->moving_lvl2) @ M_local^(-1) @ M(view->anchor)
         """
         if self.mat_anchor_to_moving_lvl2 is None:
             raise ValueError("Cross-stain registration has not been initialized")
 
-        tw, th = target_size or (self.anchor_w, self.anchor_h)
-        ratio = max(0.1, target_mag / max(0.1, base_mag))
-        scale = 1.0 / ratio
-
-        # 保持几何中心对齐
-        tx = (self.anchor_w / 2.0) - scale * (tw / 2.0)
-        ty = (self.anchor_h / 2.0) - scale * (th / 2.0)
-
-        m_view_to_anchor = np.array([
-            [scale, 0.0, tx],
-            [0.0, scale, ty],
-            [0.0, 0.0, 1.0],
-        ], dtype=np.float64)
+        if target_view is not None:
+            m_view_to_anchor = self.profile.derive_view_to_anchor_matrix(self.anchor_view, target_view)
+        else:
+            base_m = base_mag if base_mag is not None else self.anchor_mag
+            tw, th = target_size or (self.anchor_w, self.anchor_h)
+            m_view_to_anchor = self.profile.derive_view_to_anchor_matrix(
+                (self.anchor_w, self.anchor_h),
+                (tw, th),
+            )
 
         scale_l2_to_l0 = scale_matrix(self.moving_ds_lvl2, self.moving_ds_lvl2)
         m_local_inv = invert_transform(self.mat_local_refinement_3x3)
@@ -200,7 +201,15 @@ class TransformGraph:
         return m_total_view_to_l0
 
     def get_crop20_to_moving_lvl0(self) -> np.ndarray:
-        return self.get_view_to_moving_lvl0(target_mag=20.0, base_mag=4.0, target_size=(self.secondary_w, self.secondary_h))
+        return self.get_view_to_moving_lvl0(
+            target_view=self.secondary_view or (self.secondary_w, self.secondary_h),
+            target_mag=self.secondary_mag,
+            base_mag=self.anchor_mag,
+        )
 
     def get_crop4_to_moving_lvl0(self) -> np.ndarray:
-        return self.get_view_to_moving_lvl0(target_mag=4.0, base_mag=4.0, target_size=(self.anchor_w, self.anchor_h))
+        return self.get_view_to_moving_lvl0(
+            target_view=self.anchor_view,
+            target_mag=self.anchor_mag,
+            base_mag=self.anchor_mag,
+        )
