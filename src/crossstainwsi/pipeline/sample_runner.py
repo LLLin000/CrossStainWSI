@@ -257,7 +257,11 @@ class SampleRunner:
                         stain_extracted_views[v.name] = view_img
 
                 # QC 判定
-                qc_status, qc_reason = self.qc_engine.evaluate_cross_stain(global_res.metrics)
+                # QC 判定 (考虑扫描仪物理分辨率 MPP 比例)
+                expected_scale = ref_spec.mpp_x / max(1e-5, moving_reader.read_metadata().mpp_x)
+                qc_status, qc_failure_code, qc_reason = self.qc_engine.evaluate_cross_stain(
+                    global_res.metrics, expected_scale_from_mpp=expected_scale
+                )
                 if qc_status == RegistrationStatus.ABSTAIN:
                     overall_verdict = RunVerdict.ABSTAIN
                 elif qc_status == RegistrationStatus.WARN and overall_verdict == RunVerdict.PASS:
@@ -269,6 +273,7 @@ class SampleRunner:
                     reference_stain=plan.reference_stain,
                     status=qc_status,
                     reason=qc_reason,
+                    failure_code=qc_failure_code,
                     transform_matrix_3x3=global_res.mat_moving_to_ref_lvl4.tolist(),
                     metrics=global_res.metrics,
                     qc_details={

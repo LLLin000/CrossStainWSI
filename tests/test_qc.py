@@ -1,4 +1,4 @@
-from crossstainwsi.domain import QCMetrics, RegistrationStatus
+from crossstainwsi.domain import FailureCode, QCMetrics, RegistrationStatus
 from crossstainwsi.qc.rules import QCRuleEngine
 
 
@@ -15,8 +15,9 @@ def test_qc_rule_engine():
         scale=1.002,
         rotation_deg=0.5,
     )
-    status, _ = engine.evaluate_cross_stain(strong_metrics)
+    status, failure_code, _ = engine.evaluate_cross_stain(strong_metrics)
     assert status == RegistrationStatus.PASS
+    assert failure_code == FailureCode.NONE
 
     # 2. 内点极低应 ABSTAIN
     weak_metrics = QCMetrics(
@@ -26,8 +27,9 @@ def test_qc_rule_engine():
         spatial_coverage=0.1,
         scale=1.0,
     )
-    status, _ = engine.evaluate_cross_stain(weak_metrics)
+    status, failure_code, _ = engine.evaluate_cross_stain(weak_metrics)
     assert status == RegistrationStatus.ABSTAIN
+    assert failure_code == FailureCode.FEATURE_MATCH_WEAK
 
     # 3. 异常缩放形变应 ABSTAIN
     deformed_metrics = QCMetrics(
@@ -37,10 +39,11 @@ def test_qc_rule_engine():
         spatial_coverage=0.6,
         scale=1.45,  # 严重异常尺度
     )
-    status, _ = engine.evaluate_cross_stain(deformed_metrics)
+    status, failure_code, _ = engine.evaluate_cross_stain(deformed_metrics)
     assert status == RegistrationStatus.ABSTAIN
+    assert failure_code == FailureCode.STRUCTURE_CONFLICT
 
-    # 4. 临界质量应 WARN
+    # 4. 临界质量应 WARN (归因为切片对应弱)
     marginal_metrics = QCMetrics(
         inliers=25,
         matches=100,
@@ -48,5 +51,6 @@ def test_qc_rule_engine():
         spatial_coverage=0.25,
         scale=1.01,
     )
-    status, _ = engine.evaluate_cross_stain(marginal_metrics)
+    status, failure_code, _ = engine.evaluate_cross_stain(marginal_metrics)
     assert status == RegistrationStatus.WARN
+    assert failure_code == FailureCode.SECTION_CORRESPONDENCE_WEAK

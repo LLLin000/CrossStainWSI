@@ -67,3 +67,25 @@ def test_transform_graph_composite():
     m20_to_l0 = graph.get_crop20_to_moving_lvl0()
     assert m20_to_l0.shape == (3, 3)
     assert not np.isnan(m20_to_l0).any()
+
+
+def test_transform_graph_evidence_views():
+    from crossstainwsi.domain import EvidenceView
+    view_anchor = EvidenceView(id="overview", width_px=2000, height_px=1000, nominal_magnification=4.0)
+    view_detail = EvidenceView(id="detail", width_px=2000, height_px=1000, nominal_magnification=20.0)
+
+    graph = TransformGraph(
+        anchor_view=view_anchor,
+        secondary_view=view_detail,
+        ref_ds_lvl2=4.0,
+        ref_ds_lvl4=16.0,
+        moving_ds_lvl2=4.0,
+        moving_ds_lvl4=16.0,
+    )
+    mat_anchor_l4 = np.array([[1.0, 0.0, 50.0], [0.0, 1.0, 80.0]])
+    graph.set_reference_anchor(mat_anchor_l4)
+    graph.set_global_cross_stain(np.eye(3))
+
+    m_detail_l0 = graph.get_view_to_moving_lvl0(target_mag=20.0, base_mag=4.0)
+    assert m_detail_l0.shape == (3, 3)
+    assert not np.isnan(m_detail_l0).any()
