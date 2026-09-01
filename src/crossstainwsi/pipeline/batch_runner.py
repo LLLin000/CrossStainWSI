@@ -83,11 +83,13 @@ class BatchRunner:
 
             # 每次处理完一个样本即时保存一次 batch_summary.json (断点安全)
             summary["elapsed_seconds"] = round(time.time() - start_time, 2)
-            summary_path = self.cfg.output_dir / "batch_summary.json"
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(summary, f, indent=2, ensure_ascii=False)
-
+            try:
+                summary_path = self.cfg.output_dir / "batch_summary.json"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, indent=2, ensure_ascii=False)
+            except Exception as save_err:
+                print(f"   [WARN] Could not write batch summary to {self.cfg.output_dir}: {save_err}")
         print("\n================ Batch Processing Complete ================")
         print(f"Total: {summary['total_samples']} | Success: {summary['success']} | Warn: {summary['warn']} | Fail/Abstain: {summary['abstain_or_fail']}")
         print(f"Total Elapsed Time: {summary['elapsed_seconds']:.2f}s")

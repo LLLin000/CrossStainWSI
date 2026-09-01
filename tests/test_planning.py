@@ -70,3 +70,20 @@ def test_planner_missing_required_stain():
     assert not plan.is_executable
     assert "HE" in plan.missing_required_stains
     assert "Required stains missing" in plan.block_reason
+
+
+def test_view_spec_parsing():
+    v4 = ViewSpec.from_string("4x")
+    assert v4.magnification_approx == 4.0
+    assert v4.name == "4x"
+
+    v10 = ViewSpec.from_string("10X")
+    assert v10.magnification_approx == 10.0
+    assert v10.name == "10x"
+
+    v40 = ViewSpec.from_string("40")
+    assert v40.magnification_approx == 40.0
+
+    goal = UserGoal.from_magnifications(["4x", "10x", "20x", "40x"], dpi=600)
+    assert len(goal.requested_views) == 4
+    assert goal.dpi == (600, 600)

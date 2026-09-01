@@ -43,13 +43,13 @@ def main(args: List[str] = None) -> int:
     run_parser.add_argument("--out-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"), help="Output directory")
     run_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name (default: masson)")
     run_parser.add_argument("--stains", nargs="+", type=str, default=None, help="Target stains to register (e.g. HE Gram)")
+    run_parser.add_argument("--views", "-m", nargs="+", type=str, default=["4x", "20x"], help="Requested output magnification views (e.g. 4x 20x 10x)")
     run_parser.add_argument("--dpi", type=int, default=300, help="Output image DPI (default: 300)")
     run_parser.add_argument("--scale-ratio", type=float, default=5.0, help="Magnification sampling scale ratio between 20x and 4x (default: 5.0)")
     run_parser.add_argument("--mirror", action="store_true", help="Force horizontal mirror correction for input crop")
     run_parser.add_argument("--no-overlay", action="store_true", help="Disable generating overlay comparison images")
     run_parser.add_argument("--contact-sheet", action="store_true", help="Enable generating side-by-side contact sheets")
     run_parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
-
     # 4. batch (多样本批量执行)
     batch_parser = subparsers.add_parser("batch", help="Execute registration on a batch of samples")
     batch_parser.add_argument("sample_ids", nargs="+", type=str, help="List of sample identifiers")
@@ -58,11 +58,11 @@ def main(args: List[str] = None) -> int:
     batch_parser.add_argument("--out-dir", type=Path, default=Path(r"E:\研究数据\骨科\切片扫描\registered_crops_300dpi"), help="Output directory")
     batch_parser.add_argument("--ref-stain", type=str, default="masson", help="Reference stain name (default: masson)")
     batch_parser.add_argument("--stains", nargs="+", type=str, default=None, help="Target stains to register (e.g. HE Gram)")
+    batch_parser.add_argument("--views", "-m", nargs="+", type=str, default=["4x", "20x"], help="Requested output magnification views (e.g. 4x 20x 10x)")
     batch_parser.add_argument("--dpi", type=int, default=300, help="Output image DPI (default: 300)")
     batch_parser.add_argument("--scale-ratio", type=float, default=5.0, help="Sampling scale ratio (default: 5.0)")
     batch_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing completed sample reports")
     batch_parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
-
     parsed = parser.parse_args(args)
 
     if parsed.command == "discover":
@@ -114,6 +114,12 @@ def main(args: List[str] = None) -> int:
             mirrored_set.add(parsed.sample_id)
 
         moving = parsed.stains or ["HE", "Gram"]
+        goal = UserGoal.from_magnifications(
+            mags=parsed.views,
+            reference_stain=parsed.ref_stain,
+            target_stains=moving,
+            dpi=parsed.dpi,
+        )
         cfg = PipelineConfig(
             base_dir=parsed.base_dir,
             tiff_dir=parsed.tiff_dir,
@@ -127,7 +133,7 @@ def main(args: List[str] = None) -> int:
             save_contact_sheets=parsed.contact_sheet,
             device=parsed.device,
         )
-        runner = SampleRunner(config=cfg)
+        runner = SampleRunner(config=cfg, goal=goal)
         runner.process(parsed.sample_id)
         return 0
 

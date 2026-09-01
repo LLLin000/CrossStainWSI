@@ -138,16 +138,42 @@ class TransformGraph:
         )
         return m_total_20x_to_l0
 
-    def get_crop4_to_moving_lvl0(self) -> np.ndarray:
+    def get_view_to_moving_lvl0(
+        self,
+        target_mag: float = 4.0,
+        base_mag: float = 4.0,
+        target_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """
+        计算任意倍率 (如 4x, 10x, 20x, 40x) 视图直接到 Moving 切片 Level 0 的复合映射矩阵
+        """
         if self.mat_crop4_to_moving_lvl2 is None:
             raise ValueError("Cross-stain registration has not been initialized")
+
+        tw, th = target_size or (self.crop4_w, self.crop4_h)
+        ratio = max(0.1, target_mag / max(0.1, base_mag))
+        scale = 1.0 / ratio
+
+        # 保持中心对齐
+        tx = (self.crop4_w / 2.0) - scale * (tw / 2.0)
+        ty = (self.crop4_h / 2.0) - scale * (th / 2.0)
+
+        m_view_to_crop4 = np.array([
+            [scale, 0.0, tx],
+            [0.0, scale, ty],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
 
         scale_l2_to_l0 = scale_matrix(self.moving_ds_lvl2, self.moving_ds_lvl2)
         m_local_inv = invert_transform(self.mat_local_refinement_3x3)
 
-        m_total_4x_to_l0 = (
+        m_total_view_to_l0 = (
             scale_l2_to_l0
             @ self.mat_crop4_to_moving_lvl2
             @ m_local_inv
+            @ m_view_to_crop4
         )
-        return m_total_4x_to_l0
+        return m_total_view_to_l0
+
+    def get_crop4_to_moving_lvl0(self) -> np.ndarray:
+        return self.get_view_to_moving_lvl0(target_mag=4.0, base_mag=4.0, target_size=(self.crop4_w, self.crop4_h))

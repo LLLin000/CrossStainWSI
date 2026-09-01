@@ -237,14 +237,24 @@ class SampleRunner:
                 graph.set_local_refinement(local_res.mat_local_3x3)
                 aligned_4x = local_res.aligned_image_bgr
 
-                # 20x Level 0 直接重采样
-                mat_crop20_to_mov_l0 = graph.get_crop20_to_moving_lvl0()
-                aligned_20x = WSISampler.sample_patch(
-                    moving_reader,
-                    mat_crop20_to_mov_l0,
-                    (crop20_w, crop20_h),
-                    level=0,
-                )
+                # 根据 requested_views 动态提取所有倍率视场 (如 4x, 10x, 20x, 40x)
+                stain_extracted_views: Dict[str, np.ndarray] = {}
+                for v in target_views:
+                    if v.name.lower() in ("4x", "overview"):
+                        stain_extracted_views[v.name] = aligned_4x
+                    else:
+                        mat_v_to_mov_l0 = graph.get_view_to_moving_lvl0(
+                            target_mag=v.magnification_approx,
+                            base_mag=4.0,
+                            target_size=v.pixel_dimensions,
+                        )
+                        view_img = WSISampler.sample_patch(
+                            moving_reader,
+                            mat_v_to_mov_l0,
+                            v.pixel_dimensions,
+                            level=0,
+                        )
+                        stain_extracted_views[v.name] = view_img
 
                 # QC 判定
                 qc_status, qc_reason = self.qc_engine.evaluate_cross_stain(global_res.metrics)
@@ -252,9 +262,6 @@ class SampleRunner:
                     overall_verdict = RunVerdict.ABSTAIN
                 elif qc_status == RegistrationStatus.WARN and overall_verdict == RunVerdict.PASS:
                     overall_verdict = RunVerdict.REVIEW
-
-                all_4x_images[stain] = aligned_4x
-                all_20x_images[stain] = aligned_20x
 
                 results_by_stain[stain] = RegistrationResult(
                     sample_id=sample_id,
@@ -267,6 +274,7 @@ class SampleRunner:
                     qc_details={
                         "global": global_res.details,
                         "local": local_res.details,
+                        "extracted_views": list(stain_extracted_views.keys()),
                     },
                 )
 
@@ -274,7 +282,7 @@ class SampleRunner:
         target_out_dir = resolve_artifact_dir(sample_base_out, overall_verdict)
         print(f"\n[Routing] Overall Verdict: {overall_verdict.value} -> Saving to: {target_out_dir}")
 
-        # 保存参考图像与移动对齐图像 (遵循配置的 DPI)
+        # 保存参考图像与移动对齐图像 (遵循配置的 DPI 与视图)
         dpi_tuple = (self.cfg.dpi, self.cfg.dpi)
         ref_name = plan.reference_stain.capitalize()
         ImageCropReader.save_publication_tiff(
@@ -290,26 +298,25 @@ class SampleRunner:
 
         for stain, res in results_by_stain.items():
             if res.status != RegistrationStatus.ABSTAIN:
-                ImageCropReader.save_publication_tiff(
-                    all_4x_images[stain],
-                    target_out_dir / f"{sample_id}-{stain}-4x-aligned-{self.cfg.dpi}dpi.tif",
-                    dpi=dpi_tuple,
-                )
-                ImageCropReader.save_publication_tiff(
-                    all_20x_images[stain],
-                    target_out_dir / f"{sample_id}-{stain}-20x-aligned-{self.cfg.dpi}dpi.tif",
-                    dpi=dpi_tuple,
-                )
+                # 保存所有提取的视图
+                extracted_views = res.qc_details.get("extracted_views", ["4x", "20x"])
+                for v_name in extracted_views:
+                    v_img = aligned_4x if v_name.lower() in ("4x", "overview") else aligned_20x
+                    ImageCropReader.save_publication_tiff(
+                        v_img,
+                        target_out_dir / f"{sample_id}-{stain}-{v_name}-aligned-{self.cfg.dpi}dpi.tif",
+                        dpi=dpi_tuple,
+                    )
                 if self.cfg.save_overlays:
                     ImageCropReader.save_overlay_png(
                         ref_4x_extracted,
-                        all_4x_images[stain],
+                        aligned_4x,
                         target_out_dir / f"overlay-{stain}-4x-aligned.png",
                         dpi=dpi_tuple,
                     )
                     ImageCropReader.save_overlay_png(
                         ref_20x_extracted,
-                        all_20x_images[stain],
+                        aligned_20x,
                         target_out_dir / f"overlay-{stain}-20x-aligned.png",
                         dpi=dpi_tuple,
                     )
