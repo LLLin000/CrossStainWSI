@@ -5,6 +5,7 @@ from crossstainwsi.representation.ihc import IHCDeconvolutionAdapter
 from crossstainwsi.representation.fluorescence import (
     ChannelEvidenceSelector,
     FluorescenceAdapter,
+    NuclearChannelResolver,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "IHCDeconvolutionAdapter",
     "ChannelEvidenceSelector",
     "FluorescenceAdapter",
+    "NuclearChannelResolver",
 ]

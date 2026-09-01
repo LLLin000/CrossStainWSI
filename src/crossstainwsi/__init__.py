@@ -71,6 +71,7 @@ from crossstainwsi.representation import (
     FluorescenceAdapter,
     GenericBrightfieldAdapter,
     IHCDeconvolutionAdapter,
+    NuclearChannelResolver,
     RepresentationBuilder,
 )
 from crossstainwsi.review import (
@@ -145,6 +146,7 @@ __all__ = [
     "launch_gui",
     "CanonicalRepresentationSet",
     "RepresentationBuilder",
+    "NuclearChannelResolver",
     "GenericBrightfieldAdapter",
     "IHCDeconvolutionAdapter",
     "ChannelEvidenceSelector",

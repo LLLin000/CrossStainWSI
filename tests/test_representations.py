@@ -72,3 +72,24 @@ def test_fluorescence_adapter_and_channel_selector():
     assert rep.nuclear_density is not None
     assert rep.feature_image is not None
     assert rep.representation_provenance["inverted_brightfield"] is True
+
+
+def test_fluorescence_adapter_without_dapi_safe_fallback():
+    """
+    测试当荧光切片不包含 DAPI/Hoechst 且无核斑点时，
+    NuclearChannelResolver 不盲目硬猜，nuclear_density 安全设为 None
+    """
+    from crossstainwsi.representation.fluorescence import NuclearChannelResolver
+    # 仅含弥散抗原通道 (无 DAPI 斑点)
+    ch0 = np.full((100, 100), 50, dtype=np.uint8)
+    ch1 = np.full((100, 100), 80, dtype=np.uint8)
+    multi_ch = np.stack([ch0, ch1], axis=-1)
+
+    nuc_idx, data, name = NuclearChannelResolver.resolve_nuclear_channel(multi_ch, ["CD20", "CD68"])
+    assert nuc_idx is None
+    assert name == "none"
+
+    adapter = FluorescenceAdapter()
+    rep = adapter.adapt(multi_ch, ["CD20", "CD68"])
+    assert rep.nuclear_density is None
+    assert rep.feature_image is not None

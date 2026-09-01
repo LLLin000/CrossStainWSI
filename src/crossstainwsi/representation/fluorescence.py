@@ -13,12 +13,13 @@ from crossstainwsi.representation.contracts import CanonicalRepresentationSet
 
 class NuclearChannelResolver:
     """
-    负责从多通道切片中精确识别并提取 DAPI / Hoechst 细胞核染色通道
+    负责从多通道切片中精确识别并提取 DAPI / Hoechst 细胞核染色通道 (带严格核结构质量门限，拒绝盲目硬猜)
     """
     @staticmethod
     def resolve_nuclear_channel(
         channels_hwc: np.ndarray,
         channel_names: Optional[List[str]] = None,
+        min_spot_score_thresh: float = 2.0,
     ) -> Tuple[Optional[int], Optional[np.ndarray], str]:
         if channels_hwc.ndim == 2:
             return 0, channels_hwc, "single_channel"
@@ -46,9 +47,14 @@ class NuclearChannelResolver:
                 # 顶帽变换提取细小圆点状细胞核
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
                 tophat = cv2.morphologyEx(ch, cv2.MORPH_TOPHAT, kernel)
-                score = float(tophat.mean() * dyn)
+                score = float(tophat.mean() * (dyn / 255.0))
                 spot_scores.append(score)
-            dapi_idx = int(np.argmax(spot_scores)) if spot_scores else 0
+
+            if spot_scores and max(spot_scores) >= min_spot_score_thresh:
+                dapi_idx = int(np.argmax(spot_scores))
+            else:
+                # 质量不足且未命名的通道，拒绝硬猜为 DAPI
+                return None, None, "none"
 
         ch_data = channels_hwc[:, :, dapi_idx]
         ch_name = channel_names[dapi_idx] if channel_names and dapi_idx < len(channel_names) else f"Channel_{dapi_idx}"
@@ -137,7 +143,6 @@ class FluorescenceAdapter:
         mpp_xy: Optional[Tuple[float, float]] = None,
         source_level: int = 4,
     ) -> CanonicalRepresentationSet:
-        # 统一转为 (H, W, C)
         if img_data.ndim == 3:
             if img_data.shape[0] < img_data.shape[2]:
                 channels_hwc = np.transpose(img_data, (1, 2, 0))
@@ -148,13 +153,16 @@ class FluorescenceAdapter:
 
         # 1. 细胞核通道精确提取 (NuclearChannelResolver)
         nuc_idx, dapi_raw, nuc_name = NuclearChannelResolver.resolve_nuclear_channel(channels_hwc, channel_names)
-        p_min, p_max = float(dapi_raw.min()), float(dapi_raw.max())
-        if p_max - p_min > 1e-4:
-            dapi_uint8 = ((dapi_raw - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
+        if dapi_raw is not None:
+            p_min, p_max = float(dapi_raw.min()), float(dapi_raw.max())
+            if p_max - p_min > 1e-4:
+                dapi_uint8 = ((dapi_raw - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
+            else:
+                dapi_uint8 = np.zeros(dapi_raw.shape[:2], dtype=np.uint8)
+            nuclear_field = self._extract_log_nuclear_field(dapi_uint8)
         else:
-            dapi_uint8 = np.zeros(dapi_raw.shape[:2], dtype=np.uint8)
-
-        nuclear_field = self._extract_log_nuclear_field(dapi_uint8)
+            dapi_uint8 = np.zeros((channels_hwc.shape[0], channels_hwc.shape[1]), dtype=np.uint8)
+            nuclear_field = None
 
         # 2. 辅助特征通道优选 (ChannelEvidenceSelector)
         feat_idx, ch_info = ChannelEvidenceSelector.select_best_channels(channels_hwc, channel_names)
@@ -166,10 +174,11 @@ class FluorescenceAdapter:
             feat_uint8 = dapi_uint8
 
         # 3. 宏观组织支撑掩模 (Tissue Support Mask) 与 细胞核信号掩模 (Signal Mask)
-        # 信号掩模 (局部光斑)
-        _, signal_mask = cv2.threshold(dapi_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # 宏观组织支撑掩模: 通过大尺度高斯模糊 + 闭运算生成平滑的宏观组织包络 (Tissue Envelope)
-        env_blur = cv2.GaussianBlur(dapi_uint8.astype(np.float32), (31, 31), 10.0)
+        ref_signal_src = dapi_uint8 if dapi_raw is not None else feat_uint8
+        _, signal_mask = cv2.threshold(ref_signal_src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # 宏观组织包络: 大尺度高斯平滑 + 闭运算生成宏观组织包络 (Tissue Envelope)
+        env_blur = cv2.GaussianBlur(ref_signal_src.astype(np.float32), (31, 31), 10.0)
         tissue_support_mask = (env_blur > 10.0).astype(np.uint8) * 255
         kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
         tissue_support_mask = cv2.morphologyEx(tissue_support_mask, cv2.MORPH_CLOSE, kernel_large)
@@ -178,7 +187,7 @@ class FluorescenceAdapter:
         pseudo_brightfield = 255 - feat_uint8
         feature_img = self.clahe.apply(pseudo_brightfield)
 
-        # 5. 宏观组织外轮廓与距离场 (严格由组织宏观包络生成，绝非数万个孤立核斑点)
+        # 5. 宏观组织外轮廓与距离场 (严格由组织宏观包络生成)
         coarse_contour = RepresentationBuilder.compute_coarse_contour(tissue_support_mask)
         distance_field = RepresentationBuilder.compute_distance_field(tissue_support_mask)
         gradient_pyramid = RepresentationBuilder.compute_gradient_pyramid(feature_img)
@@ -201,7 +210,7 @@ class FluorescenceAdapter:
             source_level=source_level,
             modality="fluorescence",
             representation_provenance={
-                "method": "DAPI_LoG_Nuclear_Response",
+                "method": "DAPI_LoG_Nuclear_Response" if dapi_raw is not None else "Auxiliary_Feature_Only",
                 "nuclear_channel": nuc_name,
                 "feature_channel": ch_info.get("best_name"),
                 "inverted_brightfield": True,

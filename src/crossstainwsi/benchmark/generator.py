@@ -143,9 +143,10 @@ class SyntheticPerturbationGenerator:
         image_bgr: np.ndarray,
         base_name: str = "synth",
         include_negatives: bool = True,
+        seed: Optional[int] = 42,
     ) -> List[PerturbationCase]:
         """
-        生成覆盖多角度、多平移、缩放、镜像以及不可配准负例的标准压力测试套件
+        生成覆盖多角度、多平移、缩放、镜像以及不可配准负例的标准压力测试套件 (带确定性 RNG 种子)
         """
         cases = []
         # 正例组 1: 纯微小位移
@@ -164,8 +165,9 @@ class SyntheticPerturbationGenerator:
         if include_negatives:
             # 负例 1: 纯空白背景玻片 (应被正确 ABSTAIN 拒绝)
             cases.append(cls.generate_blank_case(image_bgr, case_id=f"{base_name}_neg_blank"))
-            # 负例 2: 随机高斯噪声无结构图像 (应被正确 ABSTAIN 拒绝)
-            noise_img = np.random.randint(50, 200, image_bgr.shape, dtype=np.uint8)
+            # 负例 2: 可复现随机噪声无结构图像 (应被正确 ABSTAIN 拒绝)
+            rng = np.random.default_rng(seed)
+            noise_img = rng.integers(50, 200, image_bgr.shape, dtype=np.uint8)
             cases.append(cls.generate_negative_case(image_bgr, noise_img, case_id=f"{base_name}_neg_noise"))
 
         return cases
