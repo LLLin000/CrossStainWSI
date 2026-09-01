@@ -1,11 +1,23 @@
 """
-CrossStainWSI: Auditable Cross-Stain Whole-Slide Image Registration & Workflow Toolkit
+CrossStainWSI: Auditable Cross-Stain Whole-Slide Image Registration & Multi-Scale Workflow Toolkit
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
+from crossstainwsi.benchmark import (
+    BenchmarkEvaluator,
+    BenchmarkHarness,
+    BenchmarkSummary,
+    CaseEvaluationResult,
+    GroundTruthParams,
+    PerturbationCase,
+    SyntheticPerturbationGenerator,
+)
 from crossstainwsi.domain import (
     CoordinateSpace,
+    EvidenceRecord,
+    EvidenceView,
+    FailureCode,
     PyramidLevel,
     QCMetrics,
     RegistrationResult,
@@ -27,9 +39,11 @@ from crossstainwsi.matching import (
     ImageMatcher,
     LoFTRMatcher,
     MatchResult,
+    NormalizedMutualInformationMatcher,
     PhaseCorrelationMatcher,
     SiftMatcher,
     TemplateMatcher,
+    compute_nmi,
 )
 from crossstainwsi.pipeline import BatchRunner, PipelineConfig, SampleRunner
 from crossstainwsi.planning import (
@@ -51,6 +65,14 @@ from crossstainwsi.registration import (
     ReferenceAnchorLocator,
 )
 from crossstainwsi.reporting import ContactSheetGenerator, ReportGenerator
+from crossstainwsi.representation import (
+    CanonicalRepresentationSet,
+    ChannelEvidenceSelector,
+    FluorescenceAdapter,
+    GenericBrightfieldAdapter,
+    IHCDeconvolutionAdapter,
+    RepresentationBuilder,
+)
 from crossstainwsi.review import (
     ArtifactTier,
     ConfidenceTier,
@@ -64,6 +86,9 @@ from crossstainwsi.transforms import TransformGraph
 __all__ = [
     "__version__",
     "CoordinateSpace",
+    "EvidenceView",
+    "EvidenceRecord",
+    "FailureCode",
     "PyramidLevel",
     "QCMetrics",
     "RegistrationResult",
@@ -80,6 +105,8 @@ __all__ = [
     "TemplateMatcher",
     "LoFTRMatcher",
     "PhaseCorrelationMatcher",
+    "NormalizedMutualInformationMatcher",
+    "compute_nmi",
     "ReferenceAnchorLocator",
     "AnchorResult",
     "GlobalRegistrar",
@@ -116,4 +143,17 @@ __all__ = [
     "resolve_artifact_dir",
     "CrossStainWSIGUI",
     "launch_gui",
+    "CanonicalRepresentationSet",
+    "RepresentationBuilder",
+    "GenericBrightfieldAdapter",
+    "IHCDeconvolutionAdapter",
+    "ChannelEvidenceSelector",
+    "FluorescenceAdapter",
+    "GroundTruthParams",
+    "PerturbationCase",
+    "SyntheticPerturbationGenerator",
+    "BenchmarkEvaluator",
+    "BenchmarkSummary",
+    "CaseEvaluationResult",
+    "BenchmarkHarness",
 ]
