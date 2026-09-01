@@ -1,14 +1,14 @@
 """
-参考切片锚点定位与自检验证器 (支持 Normal vs Mirrored 双奇偶性假设搜索)
+参考切片锚点定位与自检验证器 (支持 EvidenceView、Normal vs Mirrored 物理反射矩阵合成与严格二义性拦截)
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
-from crossstainwsi.domain import FailureCode, QCMetrics, ROI, CoordinateSpace
+from crossstainwsi.domain import CoordinateSpace, EvidenceView, FailureCode, QCMetrics, ROI
 from crossstainwsi.io.base import SlideReader
 from crossstainwsi.matching.sift import SiftMatcher
 from crossstainwsi.matching.template import TemplateMatcher
@@ -18,7 +18,7 @@ from crossstainwsi.transforms.geom import affine, apply_mat, h
 @dataclass
 class AnchorResult:
     is_valid: bool
-    mat_anchor_to_lvl4: Optional[np.ndarray]
+    mat_anchor_to_lvl4: Optional[np.ndarray] # 严格表示从原始输入截图坐标 (x, y) 到 WSI Level 4 的变换 (含镜像反射)
     center_lvl0: Tuple[float, float]
     center_lvl4: Tuple[float, float]
     anchor_size: Tuple[int, int]
@@ -32,7 +32,6 @@ class AnchorResult:
         if self.details is None:
             self.details = {}
 
-    # 兼容旧代码属性
     @property
     def mat_crop4_to_lvl4(self) -> Optional[np.ndarray]:
         return self.mat_anchor_to_lvl4
@@ -44,7 +43,7 @@ class AnchorResult:
 
 class ReferenceAnchorLocator:
     """
-    负责在参考切片 WSI 中高置信度锁定手工截图视场 (支持正反向镜像自动决策)
+    负责在参考切片 WSI 中高置信度锁定证据视场 (支持任意 EvidenceView 倍率与反射变换自洽合成)
     """
     def __init__(
         self,
@@ -69,14 +68,15 @@ class ReferenceAnchorLocator:
         crop_bgr: np.ndarray,
         lvl4_bgr: np.ndarray,
         ds4: float,
+        nominal_mag: float = 4.0,
     ) -> Tuple[Optional[np.ndarray], QCMetrics, str]:
         # 1. 尝试 SIFT 多角度搜索
         sift_res = self.sift_matcher.match(crop_bgr, lvl4_bgr)
         if sift_res.is_valid and sift_res.metrics.inliers >= self.min_sift_inliers:
             return sift_res.matrix, sift_res.metrics, "SIFT_RANSAC"
 
-        # 2. 回退到物理尺度 NCC 模板搜索 (手工 4x 截图相对 Level 0 像素比例约为 5.0)
-        physical_scale = 5.0 / max(1.0, ds4)
+        # 2. 回退到物理尺度 NCC 模板搜索 (名义倍率相对 Level 0 像素比率为 nominal_mag * 1.25)
+        physical_scale = (nominal_mag * 1.25) / max(1.0, ds4)
         tmpl_matcher = TemplateMatcher(
             physical_scale=physical_scale,
             angle_range=(-180, 180),
@@ -92,34 +92,57 @@ class ReferenceAnchorLocator:
 
     def locate(
         self,
-        crop_bgr: np.ndarray,
+        anchor_input: Union[EvidenceView, np.ndarray],
         slide_reader: SlideReader,
         force_mirror: Optional[bool] = None,
+        crop_bgr_override: Optional[np.ndarray] = None,
     ) -> AnchorResult:
         """
         执行双奇偶性假设 (Normal vs Mirrored) 锚点定位
+        当镜像假设胜出时，自动将水平反射矩阵 F_x 合并进返回的变换矩阵中
         """
-        crop_h, crop_w = crop_bgr.shape[:2]
+        if isinstance(anchor_input, EvidenceView):
+            crop_w, crop_h = anchor_input.width_px, anchor_input.height_px
+            nominal_mag = anchor_input.nominal_magnification
+            crop_bgr = crop_bgr_override
+        else:
+            crop_bgr = anchor_input
+            crop_h, crop_w = crop_bgr.shape[:2]
+            nominal_mag = 4.0
+
+        if crop_bgr is None:
+            raise ValueError("Image array must be provided for anchor localization")
+
         lvl4_bgr, ds4, dims4 = slide_reader.read_level_image(self.ref_level)
 
+        # 构造水平翻转反射齐次矩阵 F_x: x' = w - 1 - x, y' = y
+        f_x = np.array([
+            [-1.0, 0.0, float(crop_w - 1)],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+
         if force_mirror is True:
-            # 明确指定为镜像切片
             flipped = cv2.flip(crop_bgr, 1)
-            mat, metrics, method = self._search_single_parity(flipped, lvl4_bgr, ds4)
+            mat_mirr, metrics, method = self._search_single_parity(flipped, lvl4_bgr, ds4, nominal_mag)
             chosen_mirror = True
-            is_valid = mat is not None
+            is_valid = mat_mirr is not None
             failure_code = FailureCode.NONE if is_valid else FailureCode.REFERENCE_ANCHOR_FAIL
+            # 将 F_x 合并进总映射矩阵: T_orig_to_wsi = T_flipped_to_wsi @ F_x
+            mat = affine(h(mat_mirr) @ f_x) if is_valid else None
+
         elif force_mirror is False:
-            # 明确指定为正向切片
-            mat, metrics, method = self._search_single_parity(crop_bgr, lvl4_bgr, ds4)
+            mat_norm, metrics, method = self._search_single_parity(crop_bgr, lvl4_bgr, ds4, nominal_mag)
             chosen_mirror = False
-            is_valid = mat is not None
+            is_valid = mat_norm is not None
             failure_code = FailureCode.NONE if is_valid else FailureCode.REFERENCE_ANCHOR_FAIL
+            mat = mat_norm
+
         else:
             # 双假设并行探索 (Normal vs Mirrored)
-            mat_norm, met_norm, meth_norm = self._search_single_parity(crop_bgr, lvl4_bgr, ds4)
+            mat_norm, met_norm, meth_norm = self._search_single_parity(crop_bgr, lvl4_bgr, ds4, nominal_mag)
             flipped = cv2.flip(crop_bgr, 1)
-            mat_mirr, met_mirr, meth_mirr = self._search_single_parity(flipped, lvl4_bgr, ds4)
+            mat_mirr, met_mirr, meth_mirr = self._search_single_parity(flipped, lvl4_bgr, ds4, nominal_mag)
 
             score_norm = met_norm.inliers if meth_norm == "SIFT_RANSAC" else (met_norm.ncc_score or 0.0) * 50.0
             score_mirr = met_mirr.inliers if meth_mirr == "SIFT_RANSAC" else (met_mirr.ncc_score or 0.0) * 50.0
@@ -130,20 +153,23 @@ class ReferenceAnchorLocator:
                 is_valid = False
                 failure_code = FailureCode.REFERENCE_ANCHOR_FAIL
             elif mat_mirr is not None and (mat_norm is None or score_mirr > score_norm + 15):
-                mat, metrics, method = mat_mirr, met_mirr, meth_mirr
+                # 镜像假设显著胜出，合成包含 F_x 的完整映射矩阵
+                mat = affine(h(mat_mirr) @ f_x)
+                metrics, method = met_mirr, meth_mirr
                 chosen_mirror = True
                 is_valid = True
                 failure_code = FailureCode.NONE
             elif mat_norm is not None and (mat_mirr is None or score_norm > score_mirr + 15):
-                mat, metrics, method = mat_norm, met_norm, meth_norm
+                mat = mat_norm
+                metrics, method = met_norm, meth_norm
                 chosen_mirror = False
                 is_valid = True
                 failure_code = FailureCode.NONE
             else:
-                # 两边得分非常接近，存在镜像二义性
-                mat, metrics, method = mat_norm, met_norm, meth_norm
+                # 两边得分非常接近，存在镜像二义性 -> 严格拦截拒绝 (is_valid=False)
+                mat, metrics, method = None, met_norm, meth_norm
                 chosen_mirror = False
-                is_valid = True
+                is_valid = False
                 failure_code = FailureCode.MIRROR_AMBIGUOUS
 
         if not is_valid or mat is None:
@@ -157,7 +183,7 @@ class ReferenceAnchorLocator:
                 localization_method="FAILED",
                 is_mirrored=chosen_mirror,
                 failure_code=failure_code,
-                details={"reason": "Reference anchor rejected under both normal and mirrored hypotheses"},
+                details={"reason": f"Reference anchor rejected ({failure_code.value})"},
             )
 
         mat_anchor_to_lvl4 = affine(mat)

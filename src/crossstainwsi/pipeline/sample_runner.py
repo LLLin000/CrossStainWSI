@@ -119,17 +119,22 @@ class SampleRunner:
             ds_ref_l2 = ref_reader.read_metadata().get_level_downsample(2)
             ref_islands = TissueSegmenter.find_tissue_islands(ref_lvl4_bgr)
 
+            view_primary = target_views[0] if len(target_views) > 0 else None
+            anchor_ev_view = EvidenceView(
+                id="anchor",
+                width_px=crop4_w,
+                height_px=crop4_h,
+                nominal_magnification=view_primary.magnification_approx if view_primary else 4.0,
+            )
             # 初始化拓扑变换图
             graph = TransformGraph(
-                crop4_size=(crop4_w, crop4_h),
-                crop20_size=(crop20_w, crop20_h),
+                anchor_view=anchor_ev_view,
                 ref_ds_lvl2=ds_ref_l2,
                 ref_ds_lvl4=ds_ref_l4,
                 moving_ds_lvl2=4.0,  # 稍后根据 moving 切片动态重置
                 moving_ds_lvl4=16.0,
                 acquisition_profile=self.profile,
             )
-
             # 分支 A: Native ROI 模式 (零反查误差)
             if plan.task_type == TaskType.NATIVE_ROI_MATCH:
                 ev = assets.roi_evidence
@@ -153,12 +158,23 @@ class SampleRunner:
                 ev = assets.roi_evidence
                 crop4_path = ev.crop_4x_path or ev.crop_20x_path
                 crop4_bgr, (crop4_w, crop4_h) = ImageCropReader.load_crop_bgr(crop4_path, flip_horizontal=is_mirrored)
-
-                anchor_res = self.anchor_locator.locate(crop4_bgr, ref_reader)
+                anchor_res = self.anchor_locator.locate(crop4_bgr, ref_reader, force_mirror=is_mirrored if is_mirrored else None)
                 if not anchor_res.is_valid:
-                    raise RuntimeError(f"Reference anchor localization rejected for sample {sample_id}")
+                    print(f"   [ABSTAIN] Reference anchor rejected: {anchor_res.failure_code.value}")
+                    debug_out = resolve_artifact_dir(sample_base_out, RunVerdict.ABSTAIN)
+                    report = ReportGenerator.save_sample_report(
+                        sample_id=sample_id,
+                        results={},
+                        anchor_info={"error": anchor_res.failure_code.value, "details": anchor_res.details},
+                        mpp_info={"mpp_x": ref_spec.mpp_x, "mpp_y": ref_spec.mpp_y, "provenance": ref_spec.mpp_source},
+                        fov_info={"4x_width_um": crop4_w * ref_spec.mpp_x * 5.0, "4x_height_um": crop4_h * ref_spec.mpp_y * 5.0},
+                        out_path=debug_out / "registration_report.json",
+                        elapsed_seconds=time.time() - start_time,
+                    )
+                    report["overall_status"] = RunVerdict.ABSTAIN.value
+                    return report
 
-                graph.set_reference_anchor(anchor_res.mat_crop4_to_lvl4)
+                graph.set_reference_anchor(anchor_res.mat_anchor_to_lvl4)
                 ref_4x_extracted = crop4_bgr
 
                 if ev.has_20x:
@@ -204,8 +220,10 @@ class SampleRunner:
                 graph.moving_ds_lvl2 = ds_mov_l2
                 graph.moving_ds_lvl4 = ds_mov_l4
 
-                # 物理预期尺度比: Moving L4 -> Ref L4 映射的理论像素缩放为 MPP_moving / MPP_ref
-                expected_scale = moving_spec.mpp_x / max(1e-5, ref_spec.mpp_x)
+                # 物理预期尺度比: Matching Level 4 理论像素缩放为 (MPP_moving_L0 * DS_mov_L4) / (MPP_ref_L0 * DS_ref_L4)
+                moving_effective_mpp = moving_spec.mpp_x * ds_mov_l4
+                ref_effective_mpp = ref_spec.mpp_x * ds_ref_l4
+                expected_scale = moving_effective_mpp / max(1e-5, ref_effective_mpp)
 
                 global_res = self.global_registrar.register_stain(
                     moving_lvl4_bgr,
@@ -248,11 +266,7 @@ class SampleRunner:
                     if v.name.lower() in ("4x", "overview"):
                         stain_extracted_views[v.name] = aligned_4x
                     else:
-                        mat_v_to_mov_l0 = graph.get_view_to_moving_lvl0(
-                            target_mag=v.magnification_approx,
-                            base_mag=4.0,
-                            target_size=v.pixel_dimensions,
-                        )
+                        mat_v_to_mov_l0 = graph.get_view_to_moving_lvl0(target_view=v)
                         view_img = WSISampler.sample_patch(
                             moving_reader,
                             mat_v_to_mov_l0,
