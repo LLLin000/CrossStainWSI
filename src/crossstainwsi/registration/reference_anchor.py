@@ -69,14 +69,23 @@ class ReferenceAnchorLocator:
         lvl4_bgr: np.ndarray,
         ds4: float,
         nominal_mag: float = 4.0,
+        evidence_mpp: Optional[float] = None,
+        ref_l0_mpp: float = 0.44243,
     ) -> Tuple[Optional[np.ndarray], QCMetrics, str]:
         # 1. 尝试 SIFT 多角度搜索
         sift_res = self.sift_matcher.match(crop_bgr, lvl4_bgr)
         if sift_res.is_valid and sift_res.metrics.inliers >= self.min_sift_inliers:
             return sift_res.matrix, sift_res.metrics, "SIFT_RANSAC"
 
-        # 2. 回退到物理尺度 NCC 模板搜索 (名义倍率相对 Level 0 像素比率为 nominal_mag * 1.25)
-        physical_scale = (nominal_mag * 1.25) / max(1.0, ds4)
+        # 2. 回退到物理尺度 NCC 模板搜索:
+        # 缩放因子 s = (证据图物理像素大小 MPP_evidence) / (Level 4 物理像素大小 MPP_ref_L0 * ds4)
+        if evidence_mpp is not None and evidence_mpp > 0:
+            physical_scale = evidence_mpp / max(1e-5, ref_l0_mpp * ds4)
+        else:
+            native_scan_mag = 20.0
+            crop_to_l0_ratio = native_scan_mag / max(0.1, float(nominal_mag))
+            physical_scale = crop_to_l0_ratio / max(1.0, ds4)
+
         tmpl_matcher = TemplateMatcher(
             physical_scale=physical_scale,
             angle_range=(-180, 180),
@@ -105,15 +114,19 @@ class ReferenceAnchorLocator:
             crop_w, crop_h = anchor_input.width_px, anchor_input.height_px
             nominal_mag = anchor_input.nominal_magnification
             crop_bgr = crop_bgr_override
+            evidence_mpp = anchor_input.mpp_xy[0] if anchor_input.mpp_xy else None
         else:
             crop_bgr = anchor_input
             crop_h, crop_w = crop_bgr.shape[:2]
             nominal_mag = 4.0
+            evidence_mpp = None
 
         if crop_bgr is None:
             raise ValueError("Image array must be provided for anchor localization")
 
         lvl4_bgr, ds4, dims4 = slide_reader.read_level_image(self.ref_level)
+        ref_spec = slide_reader.read_metadata()
+        ref_l0_mpp = ref_spec.mpp_x
 
         # 构造水平翻转反射齐次矩阵 F_x: x' = w - 1 - x, y' = y
         f_x = np.array([
@@ -124,15 +137,18 @@ class ReferenceAnchorLocator:
 
         if force_mirror is True:
             flipped = cv2.flip(crop_bgr, 1)
-            mat_mirr, metrics, method = self._search_single_parity(flipped, lvl4_bgr, ds4, nominal_mag)
+            mat_mirr, metrics, method = self._search_single_parity(
+                flipped, lvl4_bgr, ds4, nominal_mag, evidence_mpp, ref_l0_mpp
+            )
             chosen_mirror = True
             is_valid = mat_mirr is not None
             failure_code = FailureCode.NONE if is_valid else FailureCode.REFERENCE_ANCHOR_FAIL
-            # 将 F_x 合并进总映射矩阵: T_orig_to_wsi = T_flipped_to_wsi @ F_x
             mat = affine(h(mat_mirr) @ f_x) if is_valid else None
 
         elif force_mirror is False:
-            mat_norm, metrics, method = self._search_single_parity(crop_bgr, lvl4_bgr, ds4, nominal_mag)
+            mat_norm, metrics, method = self._search_single_parity(
+                crop_bgr, lvl4_bgr, ds4, nominal_mag, evidence_mpp, ref_l0_mpp
+            )
             chosen_mirror = False
             is_valid = mat_norm is not None
             failure_code = FailureCode.NONE if is_valid else FailureCode.REFERENCE_ANCHOR_FAIL
@@ -140,9 +156,13 @@ class ReferenceAnchorLocator:
 
         else:
             # 双假设并行探索 (Normal vs Mirrored)
-            mat_norm, met_norm, meth_norm = self._search_single_parity(crop_bgr, lvl4_bgr, ds4, nominal_mag)
+            mat_norm, met_norm, meth_norm = self._search_single_parity(
+                crop_bgr, lvl4_bgr, ds4, nominal_mag, evidence_mpp, ref_l0_mpp
+            )
             flipped = cv2.flip(crop_bgr, 1)
-            mat_mirr, met_mirr, meth_mirr = self._search_single_parity(flipped, lvl4_bgr, ds4, nominal_mag)
+            mat_mirr, met_mirr, meth_mirr = self._search_single_parity(
+                flipped, lvl4_bgr, ds4, nominal_mag, evidence_mpp, ref_l0_mpp
+            )
 
             score_norm = met_norm.inliers if meth_norm == "SIFT_RANSAC" else (met_norm.ncc_score or 0.0) * 50.0
             score_mirr = met_mirr.inliers if meth_mirr == "SIFT_RANSAC" else (met_mirr.ncc_score or 0.0) * 50.0
