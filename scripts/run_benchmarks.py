@@ -229,10 +229,15 @@ def print_markdown_table(summaries: Dict[str, BenchmarkSummary]):
 
 def main():
     print("================ Starting CrossStainWSI Comprehensive Benchmarking ================")
-    # 查找本地基准切片
-    bench_dir = Path("benchmarks")
-    if not bench_dir.exists():
-        bench_dir = Path("../CrossStainWSI/benchmarks")
+    # 查找本地基准切片 (优先真实 ihc_1.ome.tiff)
+    candidates = [Path("benchmarks"), Path("../CrossStainWSI/benchmarks"), Path("D:/L/AI/CrossStainWSI/benchmarks")]
+    bench_dir = None
+    for cand in candidates:
+        if (cand / "ihc" / "ihc_1.ome.tiff").exists():
+            bench_dir = cand
+            break
+    if bench_dir is None:
+        bench_dir = Path("benchmarks")
 
     ihc_dir = bench_dir / "ihc"
     cycif_dir = bench_dir / "cycif"

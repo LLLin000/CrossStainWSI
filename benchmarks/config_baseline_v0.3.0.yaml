@@ -1,0 +1,52 @@
+# Baseline v0.3.0 — Single Source of Truth for benchmark protocol
+# This file is read by scripts/run_benchmarks.py; do not duplicate values in README.
+seed: 42
+n_positive: 6          # small smoke suite (30 when large=True)
+n_positive_large: 30
+hard_negative:
+  n: 3                 # exploratory (formal calibration requires n>=100)
+  n_large: 3           # large mode hard negatives (n_large = max(2, n_positive_large//10))
+  crop_px: 300
+  max_overlap_fraction: 0.0   # IoU must be 0
+  min_center_distance: "diagonal/2"
+easy_negative:
+  n: 2                 # blank + noise
+image:
+  source: "benchmarks/ihc/ihc_1.ome.tiff"
+  patch_px: [800, 800]
+  location: "center"
+
+sift:
+  nfeatures: 4000
+  contrastThreshold: 0.01
+  ratio_test: 0.78
+  ransac_px: 5.0
+
+phase:
+  max_displacement_px: 60
+  min_response: 0.05
+
+loftr:
+  confidence: 0.38
+  ransac_px: 8.0
+  target_size: 640
+
+nmi:
+  max_translation_px: 40
+  max_rotation_deg: 10
+  bins: 32
+  min_score: 1.05
+  min_overlap_fraction: 0.20
+
+fusion:
+  # SIFT-gated → Phase → NMI rescue (as implemented in run_benchmarks.py)
+  min_loftr_inliers: 20
+  min_inlier_ratio: 0.15
+  min_coverage: 0.20
+  # Phase fallback if LoFTR gate fails
+  # NMI refinement on Phase prior if Phase succeeds
+
+metrics:
+  success_tre_thresh_px: 15.0
+  unsafe_tre_thresh_px: 35.0
+  conditional_tre: "among estimated matchable cases (TRE < 900), includes wrong estimates"

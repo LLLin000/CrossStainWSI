@@ -164,19 +164,35 @@ class SyntheticPerturbationGenerator:
                 sc = float(rng.choice(scales))
                 mir = bool(rng.integers(0, 2))
                 cases.append(cls.generate(image_bgr, angle_deg=ang, dx_px=dx, dy_px=dy, scale=sc, is_mirrored=mir, case_id=f"{base_name}_pos_rand_{i:03d}"))
-            # hard negatives: 同组织错误ROI (取大图不同区域)
+            # hard negatives: 同组织错误ROI — 严格保证 IoU=0 且中心距 > 对角线/2
             h0, w0 = image_bgr.shape[:2]
-            for j in range(max(2, n_large // 10)):
-                # 随机裁两个不重叠patch作为负例
-                x1, y1 = int(rng.integers(0, max(1, w0-400))), int(rng.integers(0, max(1, h0-400)))
-                x2, y2 = int(rng.integers(0, max(1, w0-400))), int(rng.integers(0, max(1, h0-400)))
-                if abs(x1-x2) < 200 and abs(y1-y2) < 200:
-                    x2 = (x2 + 400) % max(1, w0-400)
-                patch_a = image_bgr[y1:y1+400, x1:x1+400].copy()
-                patch_b = image_bgr[y2:y2+400, x2:x2+400].copy()
-                if patch_a.shape[0] < 100 or patch_b.shape[0] < 100:
+            crop = 300  # 缩小至300以在800 patch内可实现严格不重叠
+            max_x, max_y = max(1, w0 - crop), max(1, h0 - crop)
+            hard_n = max(2, n_large // 10)
+            attempts = 0
+            created = 0
+            while created < hard_n and attempts < hard_n * 50:
+                attempts += 1
+                x1, y1 = int(rng.integers(0, max_x)), int(rng.integers(0, max_y))
+                x2, y2 = int(rng.integers(0, max_x)), int(rng.integers(0, max_y))
+                # IoU / overlap check
+                inter_x1, inter_y1 = max(x1, x2), max(y1, y2)
+                inter_x2, inter_y2 = min(x1 + crop, x2 + crop), min(y1 + crop, y2 + crop)
+                inter_w, inter_h = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+                inter_area = inter_w * inter_h
+                if inter_area > 0:
                     continue
-                cases.append(cls.generate_negative_case(patch_a, patch_b, case_id=f"{base_name}_hard_neg_{j:03d}"))
+                # center distance > diagonal/2
+                cx1, cy1 = x1 + crop / 2, y1 + crop / 2
+                cx2, cy2 = x2 + crop / 2, y2 + crop / 2
+                if np.hypot(cx1 - cx2, cy1 - cy2) < np.hypot(crop, crop) / 2:
+                    continue
+                patch_a = image_bgr[y1:y1+crop, x1:x1+crop].copy()
+                patch_b = image_bgr[y2:y2+crop, x2:x2+crop].copy()
+                if patch_a.shape[0] < crop - 1 or patch_b.shape[0] < crop - 1:
+                    continue
+                cases.append(cls.generate_negative_case(patch_a, patch_b, case_id=f"{base_name}_hard_neg_{created:03d}"))
+                created += 1
             # easy negatives
             cases.append(cls.generate_blank_case(image_bgr, case_id=f"{base_name}_neg_blank"))
             rng2 = np.random.default_rng(seed if seed is not None else 0)

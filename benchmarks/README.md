@@ -1,10 +1,9 @@
-# CrossStainWSI Benchmark — Baseline v0.3.0 (Exploratory Hard-Negative)
+# CrossStainWSI Benchmark — Baseline v0.3.0 (Exploratory Hard-Negative, STRICT IoU=0)
 
 > **Status:** Frozen baseline for all M5 ablation comparisons. Do not edit metrics retroactively.
-> **Branch:** `feature/m0-m3-adapters` @ `d1811e7` (+ large-suite patch)
+> **Branch:** `feature/m0-m3-adapters` @ `FIXED hard-negative` (IoU=0, 300px, seed=42)
 > **Date:** 2026-09-01
-> **Bench code:** `src/crossstainwsi/benchmark/{generator,metrics,runner}.py` + `scripts/run_benchmarks.py`
-
+> **Bench code:** `src/crossstainwsi/benchmark/{generator,metrics,runner}.py` + `scripts/run_benchmarks.py` + `benchmarks/config_baseline_v0.3.0.yaml`
 ---
 
 ## 1. Experiment Protocol (Frozen)
@@ -27,10 +26,10 @@
 ### Negative Suite (Unmatchable, expected_matchable=False)
 - **Easy negatives (n=2):**
   - `neg_blank` — constant `255` blank slide
-  - `neg_noise` — `rng.integers(50,200, shape, dtype=uint8)` with `seed=42` (deterministic)
-- **Hard negatives — exploratory (n=3):**
-  - `hard_neg_{j}` — two non-overlapping `400×400` crops from same `800×800` tissue patch, offset `>200 px`, i.e. *same-tissue wrong ROI* (repetitive trabecular texture)
-  - **Note:** `n=3` is exploratory only; formal calibration requires `n ≥ 100` hard negatives.
+- **Hard negatives — exploratory (n=3, STRICT IoU=0):**
+  - `hard_neg_{j}` — two `300×300` crops from same `800×800` tissue patch, sampled with `IoU=0` and `center_distance > diagonal/2` (i.e. strictly non-overlapping wrong ROI), i.e. *same-tissue wrong ROI* (repetitive trabecular texture)
+  - Implementation: `SyntheticPerturbationGenerator(..., large=True, crop=300, seed=42)` with overlap check `inter_area==0` and center distance gating.
+  - **Note:** `n=3` is exploratory only; formal calibration requires `n ≥ 100` hard negatives sampled from larger WSI tissue region (not limited to single 800 patch).
 
 ### PASS Definition (QC Gates, Frozen)
 | Backend | Gate |
@@ -54,17 +53,16 @@
 
 ## 2. Observed Results (Do Not Reinterpret as Claims)
 
-### Synthetic Geometry Benchmark — Large Suite (30 pos / 3 hard / 2 easy)
+### Synthetic Geometry Benchmark — Large Suite (30 pos / 3 hard / 2 easy) — STRICT non-overlap hard negatives
 
 | Algorithm / Variant | n (pos/hard/easy) | Success | Coverage | Unsafe-PASS | FAR_hard (exploratory) | FAR_easy | Correct Abstain | cond. median TRE | cond. P90 TRE | cond. P95 TRE | Mirror Acc |
 |---|:---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
-| **Baseline SIFT** | 30 / 3 / 2 | **53.3%** (16/30) | 80.0% | **26.7%** (8/30) | **3/3 (100%, n=3)** | 60.0% | 0.59 px | 652.4 px | 660.4 px | 53.3% |
-| **Phase Correlation** | 30 / 3 / 2 | 3.3% (1/30) | 3.3% | **0%** | **0/3** | 0% | 0.03 px | 0.0 px | 0.0 px | 3.3% |
-| **LoFTR Matcher** | 30 / 3 / 2 | 23.3% (7/30) | **90.0%** | **76.7%** (23/30) | **3/3 (100%, n=3)** | 60.0% | 734.6 px | 823.5 px | 835.4 px | 53.3% |
-| **Fusion (SIFT-gated → Phase)** | 30 / 3 / 2 | 20.0% (6/30) | 20.0% | **0%** | **3/3 (100%, n=3)** | 60.0% | 0.26 px | 0.3 px | 0.3 px | 20.0% |
+| **Baseline SIFT** | 30 / 3 / 2 | **53.3%** (16/30) | 80.0% | **26.7%** (8/30) | **1/3 (33.3%, n=3)** | 0.0% | 0.59 px | 652.4 px | 660.4 px | 53.3% |
+| **Phase Correlation** | 30 / 3 / 2 | 3.3% (1/30) | 3.3% | **0%** | **0/3** | 0.0% | 0.03 px | 0.0 px | 0.0 px | 3.3% |
+| **LoFTR Matcher** | 30 / 3 / 2 | 23.3% (7/30) | **90.0%** | **76.7%** (23/30) | **3/3 (100%, n=3)** | 0.0% | 734.6 px | 823.5 px | 835.4 px | 53.3% |
+| **Fusion (SIFT-gated → Phase)** | 30 / 3 / 2 | 20.0% (6/30) | 20.0% | **0%** | **0/3** | 0.0% | 0.26 px | 0.3 px | 0.3 px | 20.0% |
 
-> **Small smoke suite (6/2) for reference:** SIFT 66.7%/16.7% Unsafe, LoFTR 33.3%/66.7% Unsafe, median TRE 0.50 / 683 px — consistent direction, smaller sample noise ±16.7% per case.
-
+> **Small smoke suite (6/2) for reference — frozen baseline v0.3.0:** SIFT 66.7%/16.7% Unsafe, Phase 16.7%/0% Unsafe, LoFTR 33.3%/66.7% Unsafe, Fusion 33.3%/16.7% Unsafe — consistent direction, smaller sample noise ±16.7% per case.
 ### IHC Deconvolution Ablation (ihc_1 ↔ ihc_2, center 800×800, LoFTR only)
 
 | Evidence | Inliers | Inlier Ratio | Coverage |
@@ -85,18 +83,17 @@
 
 ## 3. Interpretation (Separated from Observations)
 
-- **Observed:** LoFTR coverage 90.0%, Unsafe-PASS 76.7%, cond. P90 823 px.
-  **Interpretation:** LoFTR behaves as a **high-recall hypothesis generator** in this stress suite and is **unsafe as a standalone PASS authority** under repetitive bone texture.
+- **Observed:** LoFTR coverage 90.0%, Unsafe-PASS 76.7%, FAR_hard 3/3 (100%, n=3, STRICT non-overlap), cond. P90 823 px.
+  **Interpretation:** LoFTR behaves as a **high-recall hypothesis generator** in this stress suite and is **unsafe as a standalone PASS authority** under repetitive bone texture. Hard-negative FAR confirms this even with strict non-overlap.
 
-- **Observed:** Phase coverage 3.3%, Unsafe 0%, cond. median 0.03 px.
+- **Observed:** Phase coverage 3.3%, Unsafe 0%, FAR_hard 0/3, cond. median 0.03 px.
   **Interpretation:** Phase is a **high-precision verifier inside a small basin**, not a global matcher. Low conditional TRE reflects its tiny accepted subset.
 
-- **Observed:** Fusion (SIFT-gated) reduces Unsafe 26.7% → 0% but coverage 80% → 20% and retains `FAR_hard=3/3`.
-  **Interpretation:** Gating trades coverage for safety; **hard-negative FAR remains 100% (n=3 exploratory)** — the core M5 problem. Next M5 must push coverage up at fixed `Unsafe <1%`, not merely push Unsafe down.
+- **Observed:** Fusion (SIFT-gated) reduces Unsafe 26.7% → 0% and FAR_hard 33.3% → 0% (strict non-overlap) at cost of coverage 80% → 20%.
+  **Interpretation:** Gating trades coverage for safety; **hard-negative FAR now 0/3 after strict IoU fix** (vs 3/3 before) shows strict non-overlap definition matters. Still, `FAR_hard=0/3` is exploratory (n=3); formal `FAR_hard <1%` requires `n≥100` and M5 consensus must push coverage up at fixed safety, not just push Unsafe down.
 
 - **Observed:** IHC H↔H inlier drop −27.8%.
   **Interpretation:** No accuracy claim possible without geometry (TRE / transform consistency). Future ablation: `raw | H-only | raw+H dual evidence` on `H&E ↔ IHC` pairs.
-
 ---
 
 ## 4. M5 Target (Frozen for Next Phase)
