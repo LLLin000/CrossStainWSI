@@ -53,43 +53,58 @@ class AssetDiscoverer:
             else:
                 stain = "Unknown"
                 sample_id = stem
-                if sample_id not in samples_dict:
-                    samples_dict[sample_id] = SampleAssets(sample_id=sample_id)
 
-                samples_dict[sample_id].slides[stain] = SlideAsset(
-                    stain=stain,
-                    path=p,
-                    format=p.suffix.lstrip(".").lower(),
-                )
+            if sample_id not in samples_dict:
+                samples_dict[sample_id] = SampleAssets(sample_id=sample_id)
 
-        # 2. 如果提供了 tiff_dir，扫描已有的截图证据 (支持任意倍率如 4x, 10x, 20x, 40x)
+            samples_dict[sample_id].slides[stain] = SlideAsset(
+                stain=stain,
+                path=p,
+                format=p.suffix.lstrip(".").lower(),
+            )
+
+        # 2. 如果提供了 tiff_dir，扫描已有的截图证据 (基于已发现的 sample_id 列表进行最长前缀匹配)
         img_extensions = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+        known_sids = sorted(samples_dict.keys(), key=len, reverse=True)
+
         if self.tiff_dir and self.tiff_dir.exists():
             for p in self.tiff_dir.iterdir():
                 if not p.is_file() or p.suffix.lower() not in img_extensions:
                     continue
 
                 stem = p.stem
-                # 模式 1: 包含染色名与倍率，例如 3-4w-2-masson-4x, 3-4w-2_HE_10X, 3-4w-2-HE-40x
-                # 模式 2: 仅包含倍率，例如 3-4w-2-4x, 3-4w-2_20X, 3-4w-2-10x
-                match_named = re.match(r"^(.+?)[-_]([a-zA-Z]+)[-_](\d+(?:\.\d+)?)[xX].*$", stem)
-                match_simple = re.match(r"^(.+?)[-_](\d+(?:\.\d+)?)[xX].*$", stem)
+                matched_sid = None
 
-                if match_named:
-                    sid_raw, stain_raw, mag_str = match_named.group(1), match_named.group(2), match_named.group(3)
-                    matched_id = self._match_sample_id(sid_raw, list(samples_dict.keys()))
-                    if matched_id:
-                        ev = samples_dict[matched_id].roi_evidence
-                        ev.is_mirrored = matched_id in self.mirrored_sample_ids
-                        ev.inferred_reference_stain = stain_raw
-                        ev.add_evidence_path(p, nominal_mag=float(mag_str))
-                elif match_simple:
-                    sid_raw, mag_str = match_simple.group(1), match_simple.group(2)
-                    matched_id = self._match_sample_id(sid_raw, list(samples_dict.keys()))
-                    if matched_id:
-                        ev = samples_dict[matched_id].roi_evidence
-                        ev.is_mirrored = matched_id in self.mirrored_sample_ids
-                        ev.add_evidence_path(p, nominal_mag=float(mag_str))
+                # 优先匹配已有的 WSI 样本号
+                for sid in known_sids:
+                    if stem.lower().startswith(sid.lower()):
+                        matched_sid = sid
+                        break
+
+                # 若未能在已知 WSI 中匹配，尝试通用正则推断样本号
+                if not matched_sid:
+                    m_mag_pos = re.search(r"[-_](\d+(?:\.\d+)?)[xX]", stem)
+                    if m_mag_pos:
+                        raw_prefix = stem[:m_mag_pos.start()]
+                        matched_sid = self._match_sample_id(raw_prefix, known_sids) or raw_prefix
+
+                if matched_sid:
+                    if matched_sid not in samples_dict:
+                        samples_dict[matched_sid] = SampleAssets(sample_id=matched_sid)
+
+                    ev = samples_dict[matched_sid].roi_evidence
+                    ev.is_mirrored = matched_sid in self.mirrored_sample_ids
+
+                    # 解析倍率与染色
+                    rem = stem[len(matched_sid):].lstrip("-_") if stem.lower().startswith(matched_sid.lower()) else stem
+                    m_mag = re.search(r"(\d+(?:\.\d+)?)[xX]", rem)
+                    mag_val = float(m_mag.group(1)) if m_mag else 4.0
+
+                    stain_cand = re.sub(r"[-_]?\d+(?:\.\d+)?[xX].*$", "", rem).strip("-_")
+                    if stain_cand:
+                        ev.inferred_reference_stain = stain_cand
+
+                    ev.add_evidence_path(p, nominal_mag=mag_val)
 
         return AssetInventory(samples=samples_dict)
 
