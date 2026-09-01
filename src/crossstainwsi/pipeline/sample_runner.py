@@ -203,12 +203,30 @@ class SampleRunner:
                 v_secondary = ev.get_secondary_verification_evidence()
                 if v_secondary and v_secondary.source_path:
                     sec_raw_bgr, (sec_w, sec_h) = ImageCropReader.load_crop_bgr(v_secondary.source_path, flip_horizontal=False)
-                    m_sec_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, v_secondary, ds_ref_l2)
+                    # 重构包含真实像素尺寸的 secondary EvidenceView
+                    secondary_ev_view = EvidenceView(
+                        id=v_secondary.id,
+                        width_px=sec_w,
+                        height_px=sec_h,
+                        nominal_magnification=v_secondary.nominal_magnification,
+                        mpp_xy=v_secondary.mpp_xy,
+                        source_path=v_secondary.source_path,
+                        is_mirrored=v_secondary.is_mirrored,
+                    )
+                    m_sec_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, secondary_ev_view, ds_ref_l2)
                     sec_predicted_ref = WSISampler.sample_patch(ref_reader, m_sec_to_ref_l0, (sec_w, sec_h), level=0)
                     sec_qc = compute_same_image_metrics(sec_raw_bgr, sec_predicted_ref)
 
-                    if sec_qc.inliers < 4 and (sec_qc.ncc_score or 0.0) < 0.20:
-                        print(f"   [ABSTAIN] Secondary evidence cross-scale conflict (inliers={sec_qc.inliers}, ncc={sec_qc.ncc_score})")
+                    # 严格 SameSourceEvidenceGate 校验 (同一切片自验必须高度可信)
+                    tissue_frac = sec_qc.details.get("tissue_fraction", 0.0)
+                    is_conflict = (
+                        (sec_qc.inliers < 6 and (sec_qc.ncc_score or -1.0) < 0.30)
+                        or (tissue_frac < 0.03) # 组织过少或纯空白背景
+                        or not np.isfinite(sec_qc.ncc_score)
+                    )
+
+                    if is_conflict:
+                        print(f"   [ABSTAIN] Secondary evidence cross-scale conflict (inliers={sec_qc.inliers}, ncc={sec_qc.ncc_score:.3f}, tissue={tissue_frac:.3f})")
                         debug_out = resolve_artifact_dir(sample_base_out, RunVerdict.ABSTAIN)
                         report = ReportGenerator.save_sample_report(
                             sample_id=sample_id,
@@ -221,7 +239,6 @@ class SampleRunner:
                         )
                         report["overall_status"] = RunVerdict.ABSTAIN.value
                         return report
-
                 # 统一从 Reference WSI Level 0 单次重采样所有请求的输出视图 (保证完全相同的坐标系与未压缩画质)
                 for v in target_views:
                     m_v_to_ref_l0 = self._get_ref_view_to_l0_matrix(graph, v, ds_ref_l2)

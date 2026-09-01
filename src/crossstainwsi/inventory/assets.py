@@ -58,10 +58,8 @@ class ROIEvidence:
     @property
     def crop_4x_path(self) -> Optional[Path]:
         for v in self.evidence_views:
-            if abs(v.nominal_magnification - 4.0) < 0.1 and v.source_path:
+            if abs(v.nominal_magnification - 4.0) < 0.5 and v.source_path:
                 return v.source_path
-        if self.evidence_views and self.evidence_views[0].source_path:
-            return self.evidence_views[0].source_path
         return None
 
     @crop_4x_path.setter
@@ -72,16 +70,20 @@ class ROIEvidence:
     @property
     def crop_20x_path(self) -> Optional[Path]:
         for v in self.evidence_views:
-            if abs(v.nominal_magnification - 20.0) < 0.1 and v.source_path:
+            if abs(v.nominal_magnification - 20.0) < 1.0 and v.source_path:
                 return v.source_path
-        if len(self.evidence_views) > 1 and self.evidence_views[1].source_path:
-            return self.evidence_views[1].source_path
         return None
 
     @crop_20x_path.setter
     def crop_20x_path(self, path: Optional[Path]) -> None:
         if path is not None:
             self.add_evidence_path(path, nominal_mag=20.0)
+
+    @property
+    def first_evidence_path(self) -> Optional[Path]:
+        if self.evidence_views and self.evidence_views[0].source_path:
+            return self.evidence_views[0].source_path
+        return None
 
     @property
     def has_4x(self) -> bool:
@@ -103,17 +105,31 @@ class ROIEvidence:
         self,
         path: Path,
         nominal_mag: float = 4.0,
-        width_px: int = 2257,
-        height_px: int = 1310,
+        width_px: Optional[int] = None,
+        height_px: Optional[int] = None,
         mpp_xy: Optional[Tuple[float, float]] = None,
     ) -> EvidenceView:
         for v in self.evidence_views:
             if v.source_path == path:
                 return v
+
+        # 尝试快速读取图像文件头部的真实尺寸
+        real_w, real_h = width_px, height_px
+        if (real_w is None or real_h is None) and path.exists():
+            try:
+                from PIL import Image
+                with Image.open(path) as img:
+                    real_w, real_h = img.size
+            except Exception:
+                real_w, real_h = 2257, 1310
+        else:
+            real_w = real_w or 2257
+            real_h = real_h or 1310
+
         view = EvidenceView(
             id=f"evidence_{path.stem}",
-            width_px=width_px,
-            height_px=height_px,
+            width_px=real_w,
+            height_px=real_h,
             nominal_magnification=nominal_mag,
             mpp_xy=mpp_xy,
             source_path=path,

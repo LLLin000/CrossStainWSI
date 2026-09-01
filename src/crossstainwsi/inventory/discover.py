@@ -34,18 +34,25 @@ class AssetDiscoverer:
         # 1. 扫描所有 WSI 切片文件 (支持 kfb, svs, ndpi, mrxs, ome.tiff 等)
         wsi_extensions = {".kfb", ".svs", ".ndpi", ".mrxs", ".tiff", ".tif"}
         for p in self.base_dir.rglob("*"):
-            if p.is_file() and p.suffix.lower() in wsi_extensions:
-                stem = p.stem
-                if stem.lower().endswith(".ome"):
-                    stem = stem[:-4]
-                parts = stem.split("-")
-                if len(parts) >= 2:
-                    stain = parts[-1]
-                    sample_id = "-".join(parts[:-1])
-                else:
-                    stain = "Unknown"
-                    sample_id = stem
+            if not p.is_file() or p.suffix.lower() not in wsi_extensions:
+                continue
 
+            # 防护：如果该文件位于 tiff_dir 下，或者是截图命名模式 (如 -4x, -20x)，跳过 WSI 扫描
+            if self.tiff_dir and (self.tiff_dir in p.parents or p.parent == self.tiff_dir):
+                continue
+            if re.search(r"[-_](\d+(?:\.\d+)?)[xX]", p.stem):
+                continue
+
+            stem = p.stem
+            if stem.lower().endswith(".ome"):
+                stem = stem[:-4]
+            parts = stem.split("-")
+            if len(parts) >= 2:
+                stain = parts[-1]
+                sample_id = "-".join(parts[:-1])
+            else:
+                stain = "Unknown"
+                sample_id = stem
                 if sample_id not in samples_dict:
                     samples_dict[sample_id] = SampleAssets(sample_id=sample_id)
 

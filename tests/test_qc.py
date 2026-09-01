@@ -54,3 +54,19 @@ def test_qc_rule_engine():
     status, failure_code, _ = engine.evaluate_cross_stain(marginal_metrics)
     assert status == RegistrationStatus.WARN
     assert failure_code == FailureCode.SECTION_CORRESPONDENCE_WEAK
+
+
+def test_compute_same_image_metrics_nan_sanitation():
+    import numpy as np
+    from crossstainwsi.qc.metrics import compute_same_image_metrics
+
+    # 纯白常数图像 (容易在 np.corrcoef 产生 NaN)
+    white_img = np.full((300, 300, 3), 255, dtype=np.uint8)
+    metrics = compute_same_image_metrics(white_img, white_img)
+
+    # 断言安全过滤为 -1.0 而不是 NaN
+    assert not np.isnan(metrics.ncc_score)
+    assert metrics.ncc_score == -1.0
+    assert not np.isnan(metrics.edge_corr)
+    assert metrics.edge_corr == -1.0
+    assert metrics.details["tissue_fraction"] == 0.0
