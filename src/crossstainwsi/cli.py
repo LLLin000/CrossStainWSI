@@ -22,6 +22,9 @@ def main(args: List[str] = None) -> int:
         description="CrossStainWSI: Auditable Cross-Stain Whole-Slide Image Registration & Multi-Scale Extraction Toolkit",
     )
     subparsers = parser.add_subparsers(dest="command", help="Sub-commands")
+    # 0. gui (图形工作台)
+    subparsers.add_parser("gui", help="Launch the CrossStainWSI graphical workbench")
+
 
     # 1. discover (资产扫描)
     disc_parser = subparsers.add_parser("discover", help="Discover available WSI slides and existing ROI evidence")
@@ -64,6 +67,11 @@ def main(args: List[str] = None) -> int:
     batch_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing completed sample reports")
     batch_parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
     parsed = parser.parse_args(args)
+
+    if parsed.command == "gui":
+        from crossstainwsi.gui.app import launch_gui
+        launch_gui()
+        return 0
 
     if parsed.command == "discover":
         cfg = PipelineConfig(base_dir=parsed.base_dir, tiff_dir=parsed.tiff_dir)

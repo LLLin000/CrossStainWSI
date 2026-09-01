@@ -14,6 +14,7 @@ from crossstainwsi.domain import (
     SlideSpec,
     TransformType,
 )
+from crossstainwsi.gui import CrossStainWSIGUI, launch_gui
 from crossstainwsi.inventory import (
     AssetDiscoverer,
     AssetInventory,
@@ -113,4 +114,6 @@ __all__ = [
     "ConfidenceTier",
     "RunVerdict",
     "resolve_artifact_dir",
+    "CrossStainWSIGUI",
+    "launch_gui",
 ]
