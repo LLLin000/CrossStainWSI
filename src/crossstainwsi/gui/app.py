@@ -13,9 +13,8 @@ from crossstainwsi.inventory.assets import AssetInventory, SampleAssets
 from crossstainwsi.inventory.discover import AssetDiscoverer
 from crossstainwsi.pipeline.config import PipelineConfig
 from crossstainwsi.pipeline.sample_runner import SampleRunner
-from crossstainwsi.planning.goal import StainRequirement, UserGoal, ViewSpec
+from crossstainwsi.planning.goal import StainRequirement, UserGoal
 from crossstainwsi.planning.planner import WorkflowPlanner
-from crossstainwsi.review.states import RunVerdict
 
 
 class CrossStainWSIGUI:
@@ -30,7 +29,7 @@ class CrossStainWSIGUI:
 
         # 状态数据
         self.inventory: Optional[AssetInventory] = None
-        self.sample_rows_data: Dict[str, Dict] = {} # sample_id -> {ref_stain, mirror, status, plan, assets}
+        self.sample_rows_data: Dict[str, Dict] = {}
         self.is_running = False
         self.stop_requested = False
 
@@ -44,7 +43,7 @@ class CrossStainWSIGUI:
         self._build_ui()
 
     def _build_ui(self):
-        # 1. 主滚动/布局容器
+        # 1. 主布局容器
         main_frame = ttk.Frame(self.root, padding=12)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -76,7 +75,8 @@ class CrossStainWSIGUI:
 
         ttk.Label(param_frame, text="默认基准染色:").pack(side=tk.LEFT, padx=(0, 4))
         self.ref_stain_var = tk.StringVar(value="masson")
-        ttk.Combobox(param_frame, textvariable=self.ref_stain_var, values=["masson", "HE", "Gram", "IHC"], width=8).pack(side=tk.LEFT, padx=(0, 15))
+        stain_presets = ["masson", "HE", "Gram", "Safranin-O", "Sirius-Red", "Toluidine-Blue", "PAS", "Goldner", "Von-Kossa"]
+        ttk.Combobox(param_frame, textvariable=self.ref_stain_var, values=stain_presets, width=14).pack(side=tk.LEFT, padx=(0, 15))
 
         ttk.Label(param_frame, text="输出 DPI:").pack(side=tk.LEFT, padx=(0, 4))
         self.dpi_var = tk.StringVar(value="300")
@@ -102,23 +102,21 @@ class CrossStainWSIGUI:
         mid_group = ttk.LabelFrame(main_frame, text=" 2. 待处理样本清单 (双击行可切换水平镜像纠偏) ", padding=10)
         mid_group.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        cols = ("sample_id", "ref_stain", "target_stains", "evidence", "mirror", "tier", "status")
+        cols = ("sample_id", "ref_stain", "target_stains", "evidence", "mirror", "status")
         self.tree = ttk.Treeview(mid_group, columns=cols, show="headings", selectmode="browse")
         self.tree.heading("sample_id", text="样本号")
         self.tree.heading("ref_stain", text="基准染色")
         self.tree.heading("target_stains", text="已发现切片")
         self.tree.heading("evidence", text="输入证据 (截图)")
         self.tree.heading("mirror", text="水平镜像纠偏?")
-        self.tree.heading("tier", text="置信度等级")
         self.tree.heading("status", text="执行状态")
 
-        self.tree.column("sample_id", width=120, anchor=tk.CENTER)
-        self.tree.column("ref_stain", width=90, anchor=tk.CENTER)
-        self.tree.column("target_stains", width=180, anchor=tk.W)
-        self.tree.column("evidence", width=150, anchor=tk.W)
-        self.tree.column("mirror", width=110, anchor=tk.CENTER)
-        self.tree.column("tier", width=140, anchor=tk.CENTER)
-        self.tree.column("status", width=100, anchor=tk.CENTER)
+        self.tree.column("sample_id", width=140, anchor=tk.CENTER)
+        self.tree.column("ref_stain", width=100, anchor=tk.CENTER)
+        self.tree.column("target_stains", width=220, anchor=tk.W)
+        self.tree.column("evidence", width=180, anchor=tk.W)
+        self.tree.column("mirror", width=120, anchor=tk.CENTER)
+        self.tree.column("status", width=110, anchor=tk.CENTER)
 
         tree_scroll = ttk.Scrollbar(mid_group, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
@@ -231,7 +229,6 @@ class CrossStainWSIGUI:
                     slides_str,
                     ev_str,
                     mirror_str,
-                    plan.confidence_tier.value,
                     "就绪" if plan.is_executable else "缺少必选切片",
                 ),
             )
@@ -330,7 +327,6 @@ class CrossStainWSIGUI:
             pct = int(((idx - 1) / total) * 100)
             self.root.after(0, self._set_progress, pct, f"[{idx}/{total}] 正在配准 {sid}...")
 
-            # 注入用户在 GUI 中修改的镜像属性
             assets = row_data["assets"]
             assets.roi_evidence.is_mirrored = row_data["is_mirror"]
 
@@ -354,7 +350,7 @@ class CrossStainWSIGUI:
         if sid in self.sample_rows_data:
             item_id = self.sample_rows_data[sid]["tree_item_id"]
             values = list(self.tree.item(item_id, "values"))
-            values[6] = status_text
+            values[5] = status_text
             self.tree.item(item_id, values=values)
 
     def _finish_batch(self):
